@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.26;
+pragma solidity ^0.8.26;
 
 import "./AtomicBase.sol";
 import "@interfaces/IUniversalRouter.sol";
@@ -11,20 +11,45 @@ import "@interfaces/ICLPool.sol";
 import "@interfaces/IMixedQuoter.sol";
 import "@interfaces/IERC20.sol";
 
+/**
+ * @title AerodromeAtomicOperations
+ * @author N0IR
+ * @notice Atomic operations for Aerodrome Finance concentrated liquidity positions
+ * @dev Provides atomic swap, mint, stake, and exit operations for Aerodrome CL pools
+ */
 contract AerodromeAtomicOperations is AtomicBase {
+    /// @notice Aerodrome Universal Router for token swaps
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
-    IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8a3302AcA833D307D11838F18DbAdA9C25);
+    /// @notice Permit2 contract for token approvals
+    IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
+    /// @notice NFT Position Manager for CL positions
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
+    /// @notice Quoter for calculating swap amounts
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0);
+    /// @notice CL Factory for pool and gauge lookups
     ICLFactory public constant CL_FACTORY = ICLFactory(0x31832f2a97Fd20664D76Cc421207669b55CE4BC0);
     
+    /// @notice USDC token address on Base
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    /// @notice AERO token address on Base
     address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
+    /// @notice WETH token address on Base
     address public constant WETH = 0x4200000000000000000000000000000000000006;
     
+    /// @notice No sqrt price limit for swaps
     uint256 private constant SQRT_PRICE_LIMIT_X96 = 0;
+    /// @notice Default slippage tolerance (1%)
     uint256 private constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
     
+    /**
+     * @notice Emitted when a new position is opened
+     * @param user The user who opened the position
+     * @param tokenId The ID of the minted position NFT
+     * @param pool The pool address
+     * @param usdcIn The amount of USDC used
+     * @param liquidity The amount of liquidity minted
+     * @param staked Whether the position was staked
+     */
     event PositionOpened(
         address indexed user,
         uint256 indexed tokenId,
@@ -34,6 +59,13 @@ contract AerodromeAtomicOperations is AtomicBase {
         bool staked
     );
     
+    /**
+     * @notice Emitted when a position is closed
+     * @param user The user who closed the position
+     * @param tokenId The ID of the closed position
+     * @param usdcOut The amount of USDC received
+     * @param aeroRewards The amount of AERO rewards collected
+     */
     event PositionClosed(
         address indexed user,
         uint256 indexed tokenId,
@@ -41,6 +73,13 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 aeroRewards
     );
     
+    /**
+     * @notice Emitted when rewards are claimed
+     * @param user The user who claimed rewards
+     * @param tokenId The position ID
+     * @param aeroAmount The amount of AERO claimed
+     * @param usdcReceived The amount of USDC received (if swapped)
+     */
     event RewardsClaimed(
         address indexed user,
         uint256 indexed tokenId,
@@ -48,16 +87,30 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 usdcReceived
     );
     
+    /**
+     * @notice Emitted on emergency withdrawal
+     * @param user The address that initiated withdrawal
+     * @param token The token withdrawn
+     * @param amount The amount withdrawn
+     */
     event EmergencyWithdraw(
         address indexed user,
         address indexed token,
         uint256 amount
     );
     
+    /**
+     * @notice Parameters for swap and mint operations
+     * @param pool The address of the Aerodrome CL pool
+     * @param tickLower The lower tick boundary for the position
+     * @param tickUpper The upper tick boundary for the position
+     * @param usdcAmount The amount of USDC to swap and add as liquidity
+     * @param minLiquidity The minimum amount of liquidity tokens to mint
+     * @param deadline The deadline timestamp for the transaction
+     * @param stake Whether to stake the position in the gauge after minting
+     */
     struct SwapMintParams {
-        address token0;
-        address token1;
-        int24 tickSpacing;
+        address pool;
         int24 tickLower;
         int24 tickUpper;
         uint256 usdcAmount;
@@ -66,6 +119,13 @@ contract AerodromeAtomicOperations is AtomicBase {
         bool stake;
     }
     
+    /**
+     * @notice Parameters for exit operations
+     * @param tokenId The ID of the position NFT to exit
+     * @param minUsdcOut The minimum amount of USDC to receive (if swapping)
+     * @param deadline The deadline timestamp for the transaction
+     * @param swapToUsdc Whether to swap all assets to USDC on exit
+     */
     struct ExitParams {
         uint256 tokenId;
         uint256 minUsdcOut;
@@ -73,6 +133,13 @@ contract AerodromeAtomicOperations is AtomicBase {
         bool swapToUsdc;
     }
     
+    /**
+     * @notice Atomically swaps USDC to pool tokens, mints a position, and optionally stakes it
+     * @dev Takes USDC from user, swaps to optimal ratio, mints position, and stakes if requested
+     * @param params The swap and mint parameters
+     * @return tokenId The ID of the minted position NFT
+     * @return liquidity The amount of liquidity minted
+     */
     function swapMintAndStake(SwapMintParams calldata params) 
         external 
         nonReentrant 
@@ -82,35 +149,39 @@ contract AerodromeAtomicOperations is AtomicBase {
     {
         _safeTransferFrom(USDC, msg.sender, address(this), params.usdcAmount);
         
-        _validateTickRange(params.tickLower, params.tickUpper, params.tickSpacing);
+        _validatePool(params.pool, address(CL_FACTORY));
         
-        address pool = CL_FACTORY.getPool(params.token0, params.token1, params.tickSpacing);
-        _validatePool(pool, address(CL_FACTORY));
+        ICLPool pool = ICLPool(params.pool);
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        int24 tickSpacing = pool.tickSpacing();
+        
+        _validateTickRange(params.tickLower, params.tickUpper, tickSpacing);
         
         (uint256 amount0Desired, uint256 amount1Desired) = _calculateOptimalAmounts(
-            params.token0,
-            params.token1,
+            token0,
+            token1,
             params.usdcAmount,
             params.tickLower,
             params.tickUpper,
-            pool
+            params.pool
         );
         
         _performSwapsForLiquidity(
-            params.token0,
-            params.token1,
+            token0,
+            token1,
             amount0Desired,
             amount1Desired
         );
         
-        _safeApprove(params.token0, address(POSITION_MANAGER), amount0Desired);
-        _safeApprove(params.token1, address(POSITION_MANAGER), amount1Desired);
+        _safeApprove(token0, address(POSITION_MANAGER), amount0Desired);
+        _safeApprove(token1, address(POSITION_MANAGER), amount1Desired);
         
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(
             INonfungiblePositionManager.MintParams({
-                token0: params.token0,
-                token1: params.token1,
-                tickSpacing: params.tickSpacing,
+                token0: token0,
+                token1: token1,
+                tickSpacing: tickSpacing,
                 tickLower: params.tickLower,
                 tickUpper: params.tickUpper,
                 amount0Desired: amount0Desired,
@@ -126,16 +197,23 @@ contract AerodromeAtomicOperations is AtomicBase {
         require(liquidity >= params.minLiquidity, "Insufficient liquidity minted");
         
         if (params.stake) {
-            address gauge = CL_FACTORY.gauge(pool);
+            address gauge = CL_FACTORY.gauge(params.pool);
             require(gauge != address(0), "No gauge found for pool");
             
             POSITION_MANAGER.approve(gauge, tokenId);
             IGauge(gauge).stake(tokenId);
         }
         
-        emit PositionOpened(msg.sender, tokenId, pool, params.usdcAmount, liquidity, params.stake);
+        emit PositionOpened(msg.sender, tokenId, params.pool, params.usdcAmount, liquidity, params.stake);
     }
     
+    /**
+     * @notice Atomically swaps USDC to pool tokens and mints a position (without staking)
+     * @dev Convenience function that calls swapMintAndStake with stake=false
+     * @param params The swap and mint parameters
+     * @return tokenId The ID of the minted position NFT
+     * @return liquidity The amount of liquidity minted
+     */
     function swapAndMint(SwapMintParams calldata params) 
         external 
         nonReentrant 
@@ -143,20 +221,28 @@ contract AerodromeAtomicOperations is AtomicBase {
         validAmount(params.usdcAmount)
         returns (uint256 tokenId, uint128 liquidity)
     {
-        params.stake = false;
-        return swapMintAndStake(params);
+        SwapMintParams memory modifiedParams = params;
+        modifiedParams.stake = false;
+        return this.swapMintAndStake(modifiedParams);
     }
     
+    /**
+     * @notice Atomically exits a position by unstaking, burning, and optionally swapping to USDC
+     * @dev Handles both staked and unstaked positions, collects fees and rewards
+     * @param params The exit parameters
+     * @return usdcOut The amount of USDC received (if swapping)
+     * @return aeroRewards The amount of AERO rewards collected
+     */
     function fullExit(ExitParams calldata params)
         external
         nonReentrant
         deadlineCheck(params.deadline)
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
-        (,, address token0, address token1,,,, uint128 liquidity,,,,) = POSITION_MANAGER.positions(params.tokenId);
+        (,, address token0, address token1, int24 tickSpacing,, , uint128 liquidity,,,,) = POSITION_MANAGER.positions(params.tokenId);
         require(liquidity > 0, "Position has no liquidity");
         
-        address pool = CL_FACTORY.getPool(token0, token1, 0);
+        address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
         address gauge = CL_FACTORY.gauge(pool);
         
         if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId)) {
@@ -204,15 +290,24 @@ contract AerodromeAtomicOperations is AtomicBase {
         emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
     }
     
+    /**
+     * @notice Claims AERO rewards from a staked position and optionally swaps to USDC
+     * @dev Position remains staked after claiming rewards
+     * @param tokenId The ID of the staked position
+     * @param minUsdcOut Minimum USDC to receive if swapping (0 to receive AERO)
+     * @param deadline The deadline timestamp for the transaction
+     * @return aeroAmount The amount of AERO rewards claimed
+     * @return usdcReceived The amount of USDC received (if swapped)
+     */
     function claimAndSwap(uint256 tokenId, uint256 minUsdcOut, uint256 deadline)
         external
         nonReentrant
         deadlineCheck(deadline)
         returns (uint256 aeroAmount, uint256 usdcReceived)
     {
-        (,, address token0, address token1,,,,,,,) = POSITION_MANAGER.positions(tokenId);
+        (,, address token0, address token1, int24 tickSpacing,, ,,,,,) = POSITION_MANAGER.positions(tokenId);
         
-        address pool = CL_FACTORY.getPool(token0, token1, 0);
+        address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
         address gauge = CL_FACTORY.gauge(pool);
         require(gauge != address(0), "No gauge found");
         
@@ -234,23 +329,76 @@ contract AerodromeAtomicOperations is AtomicBase {
         emit RewardsClaimed(msg.sender, tokenId, aeroAmount, usdcReceived);
     }
     
+    /**
+     * @notice Unstakes and burns a position, returning tokens to user
+     * @dev Returns the underlying tokens without swapping to USDC
+     * @param tokenId The ID of the position to unstake and burn
+     * @param deadline The deadline timestamp for the transaction
+     * @return amount0 The amount of token0 returned
+     * @return amount1 The amount of token1 returned
+     * @return aeroRewards The amount of AERO rewards collected
+     */
     function unstakeAndBurn(uint256 tokenId, uint256 deadline)
         external
         nonReentrant
         deadlineCheck(deadline)
         returns (uint256 amount0, uint256 amount1, uint256 aeroRewards)
     {
-        ExitParams memory params = ExitParams({
-            tokenId: tokenId,
-            minUsdcOut: 0,
-            deadline: deadline,
-            swapToUsdc: false
-        });
+        (,, address token0, address token1, int24 tickSpacing,, , uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
+        require(liquidity > 0, "Position has no liquidity");
         
-        (uint256 usdcOut, uint256 rewards) = fullExit(params);
-        return (amount0, amount1, rewards);
+        address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
+        address gauge = CL_FACTORY.gauge(pool);
+        
+        if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, tokenId)) {
+            IGauge(gauge).unstake(tokenId);
+            aeroRewards = IERC20(AERO).balanceOf(address(this));
+            IGauge(gauge).getReward(tokenId);
+            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroRewards;
+        }
+        
+        require(POSITION_MANAGER.ownerOf(tokenId) == msg.sender, "Not token owner");
+        
+        POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), tokenId);
+        
+        (amount0, amount1) = POSITION_MANAGER.decreaseLiquidity(
+            INonfungiblePositionManager.DecreaseLiquidityParams({
+                tokenId: tokenId,
+                liquidity: liquidity,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: deadline
+            })
+        );
+        
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: msg.sender,
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        
+        POSITION_MANAGER.burn(tokenId);
+        
+        if (aeroRewards > 0) {
+            _safeTransfer(AERO, msg.sender, aeroRewards);
+        }
     }
     
+    /**
+     * @notice Calculates optimal token amounts for liquidity provision
+     * @dev Uses the current pool price to determine the ratio of tokens needed
+     * @param token0 The address of token0
+     * @param token1 The address of token1
+     * @param usdcAmount The total USDC amount to convert
+     * @param tickLower The lower tick boundary
+     * @param tickUpper The upper tick boundary
+     * @param pool The pool address
+     * @return amount0 The optimal amount of token0
+     * @return amount1 The optimal amount of token1
+     */
     function _calculateOptimalAmounts(
         address token0,
         address token1,
@@ -260,10 +408,10 @@ contract AerodromeAtomicOperations is AtomicBase {
         address pool
     ) internal view returns (uint256 amount0, uint256 amount1) {
         ICLPool clPool = ICLPool(pool);
-        (uint160 sqrtPriceX96, int24 currentTick,,,,,) = clPool.slot0();
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = clPool.slot0();
         
-        uint256 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
-        uint256 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
         uint256 liquidity = _getLiquidityForAmounts(
             sqrtPriceX96,
@@ -281,6 +429,14 @@ contract AerodromeAtomicOperations is AtomicBase {
         );
     }
     
+    /**
+     * @notice Performs necessary swaps from USDC to get required token amounts
+     * @dev Swaps USDC to token0 and/or token1 as needed
+     * @param token0 The address of token0
+     * @param token1 The address of token1
+     * @param amount0Needed The amount of token0 needed
+     * @param amount1Needed The amount of token1 needed
+     */
     function _performSwapsForLiquidity(
         address token0,
         address token1,
@@ -296,6 +452,16 @@ contract AerodromeAtomicOperations is AtomicBase {
         }
     }
     
+    /**
+     * @notice Swaps all tokens to USDC
+     * @dev Used during exit to convert all assets to USDC
+     * @param token0 The address of token0
+     * @param token1 The address of token1
+     * @param amount0 The amount of token0 to swap
+     * @param amount1 The amount of token1 to swap
+     * @param aeroAmount The amount of AERO to swap
+     * @return totalUsdc The total USDC received from all swaps
+     */
     function _swapAllToUsdc(
         address token0,
         address token1,
@@ -320,6 +486,15 @@ contract AerodromeAtomicOperations is AtomicBase {
         }
     }
     
+    /**
+     * @notice Swaps an exact amount of input token for output token
+     * @dev Uses Universal Router V3_SWAP_EXACT_IN command
+     * @param tokenIn The input token address
+     * @param tokenOut The output token address
+     * @param amountIn The exact input amount
+     * @param minAmountOut The minimum output amount
+     * @return amountOut The actual output amount received
+     */
     function _swapExactInput(
         address tokenIn,
         address tokenOut,
@@ -343,6 +518,15 @@ contract AerodromeAtomicOperations is AtomicBase {
         amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
     }
     
+    /**
+     * @notice Swaps input token for an exact amount of output token
+     * @dev Uses Universal Router V3_SWAP_EXACT_OUT command
+     * @param tokenIn The input token address
+     * @param tokenOut The output token address
+     * @param amountOut The exact output amount desired
+     * @param maxAmountIn The maximum input amount allowed
+     * @return amountIn The actual input amount used
+     */
     function _swapExactOutput(
         address tokenIn,
         address tokenOut,
@@ -370,6 +554,12 @@ contract AerodromeAtomicOperations is AtomicBase {
         return abi.encodePacked(tokenA, uint24(3000), tokenB);
     }
     
+    /**
+     * @notice Calculates sqrt(1.0001^tick) * 2^96
+     * @dev See Uniswap V3 whitepaper for math details
+     * @param tick The tick value
+     * @return sqrtPriceX96 The sqrt price as a Q64.96 fixed point number
+     */
     function _getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
         uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
         require(absTick <= uint256(887272), "Tick out of bounds");
@@ -400,6 +590,16 @@ contract AerodromeAtomicOperations is AtomicBase {
         sqrtPriceX96 = uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
     }
     
+    /**
+     * @notice Computes liquidity amount from token amounts and price range
+     * @dev Handles cases where current price is inside/outside the range
+     * @param sqrtRatioX96 The current sqrt price
+     * @param sqrtRatioAX96 The sqrt price at lower tick
+     * @param sqrtRatioBX96 The sqrt price at upper tick
+     * @param amount0 The amount of token0
+     * @param amount1 The amount of token1
+     * @return liquidity The liquidity amount
+     */
     function _getLiquidityForAmounts(
         uint160 sqrtRatioX96,
         uint160 sqrtRatioAX96,
@@ -479,6 +679,14 @@ contract AerodromeAtomicOperations is AtomicBase {
         amount1 = mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, 1 << 96);
     }
     
+    /**
+     * @notice Calculates (a * b) / denominator with full precision
+     * @dev Handles intermediate overflow and underflow
+     * @param a First multiplicand
+     * @param b Second multiplicand
+     * @param denominator Divisor
+     * @return result The result of (a * b) / denominator
+     */
     function mulDiv(
         uint256 a,
         uint256 b,
@@ -536,6 +744,11 @@ contract AerodromeAtomicOperations is AtomicBase {
         result = prod0 * inv;
     }
     
+    /**
+     * @notice Emergency withdrawal function for stuck tokens
+     * @dev Can only be called by the contract itself (requires governance or upgrade)
+     * @param token The token address to withdraw
+     */
     function emergencyWithdraw(address token) external {
         require(msg.sender == address(this), "Only contract can call");
         uint256 balance = IERC20(token).balanceOf(address(this));

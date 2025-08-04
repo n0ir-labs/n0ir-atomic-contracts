@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.26;
+pragma solidity ^0.8.26;
 
 abstract contract AtomicBase {
     error DeadlineExpired(uint256 deadline, uint256 currentTime);
