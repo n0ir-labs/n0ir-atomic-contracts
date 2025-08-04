@@ -12,6 +12,7 @@ import "@interfaces/ICLPool.sol";
 import "@interfaces/IMixedQuoter.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/IGaugeFactory.sol";
+import "forge-std/console.sol";
 
 /**
  * @title AerodromeAtomicOperations
@@ -199,8 +200,19 @@ contract AerodromeAtomicOperations is AtomicBase {
             amount1Desired
         );
         
-        _safeApprove(token0, address(POSITION_MANAGER), amount0Desired);
-        _safeApprove(token1, address(POSITION_MANAGER), amount1Desired);
+        // Get actual balances after swaps
+        uint256 actualBalance0 = IERC20(token0).balanceOf(address(this));
+        uint256 actualBalance1 = IERC20(token1).balanceOf(address(this));
+        
+        console.log("\\n=== Minting position ===");
+        console.log("Amount0 desired:", amount0Desired);
+        console.log("Amount1 desired:", amount1Desired);
+        console.log("Actual balance0:", actualBalance0);
+        console.log("Actual balance1:", actualBalance1);
+        
+        // Use actual balances instead of desired amounts
+        _safeApprove(token0, address(POSITION_MANAGER), actualBalance0);
+        _safeApprove(token1, address(POSITION_MANAGER), actualBalance1);
         
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(
             INonfungiblePositionManager.MintParams({
@@ -209,10 +221,10 @@ contract AerodromeAtomicOperations is AtomicBase {
                 tickSpacing: tickSpacing,
                 tickLower: params.tickLower,
                 tickUpper: params.tickUpper,
-                amount0Desired: amount0Desired,
-                amount1Desired: amount1Desired,
-                amount0Min: _calculateMinimumOutput(amount0Desired, DEFAULT_SLIPPAGE_BPS),
-                amount1Min: _calculateMinimumOutput(amount1Desired, DEFAULT_SLIPPAGE_BPS),
+                amount0Desired: actualBalance0,
+                amount1Desired: actualBalance1,
+                amount0Min: _calculateMinimumOutput(actualBalance0, DEFAULT_SLIPPAGE_BPS),
+                amount1Min: _calculateMinimumOutput(actualBalance1, DEFAULT_SLIPPAGE_BPS),
                 recipient: params.stake ? address(this) : msg.sender,
                 deadline: params.deadline,
                 sqrtPriceX96: 0
@@ -502,6 +514,12 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 amount0Needed,
         uint256 amount1Needed
     ) internal {
+        // Log what we're trying to do
+        console.log("=== Performing swaps for liquidity ===");
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
+        console.log("Amount0 needed:", amount0Needed);
+        console.log("Amount1 needed:", amount1Needed);
         uint256 totalUSDC = IERC20(USDC).balanceOf(address(this));
         
         // Handle special cases
@@ -556,16 +574,25 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         // Execute swaps
         if (usdcForToken0 > 0 && amount0Needed > 0) {
+            console.log("Swapping USDC for token0:");
+            console.log("  USDC amount:", usdcForToken0);
             _executeOptimalSwap(USDC, token0, usdcForToken0, 0);
         }
         
         if (usdcForToken1 > 0 && amount1Needed > 0) {
             // Use remaining USDC for token1
             uint256 remainingUSDC = IERC20(USDC).balanceOf(address(this));
+            console.log("\\nSwapping remaining USDC for token1:");
+            console.log("  Remaining USDC:", remainingUSDC);
             if (remainingUSDC > 0) {
                 _executeOptimalSwap(USDC, token1, remainingUSDC, 0);
             }
         }
+        
+        // Log final balances
+        console.log("\\n=== Final balances before mint ===");
+        console.log("Token0 balance:", IERC20(token0).balanceOf(address(this)));
+        console.log("Token1 balance:", IERC20(token1).balanceOf(address(this)));
     }
     
     /**
@@ -633,7 +660,7 @@ contract AerodromeAtomicOperations is AtomicBase {
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee, tokenOut),  // path with fee
             true,           // payerIsUser (we already have tokens)
-            false           // useSlipstreamPools (false = use UniV3 pools, which is what Aerodrome CL pools are)
+            true            // useSlipstreamPools (true = use Slipstream/Aerodrome pools)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
@@ -673,7 +700,7 @@ contract AerodromeAtomicOperations is AtomicBase {
             maxAmountIn,    // amountInMaximum
             abi.encodePacked(tokenOut, fee, tokenIn),  // reversed path with fee
             true,           // payerIsUser
-            false           // useSlipstreamPools (false = use UniV3 pools)
+            true            // useSlipstreamPools (true = use Slipstream/Aerodrome pools)
         );
         
         uint256 balanceBefore = IERC20(tokenIn).balanceOf(address(this));
@@ -1066,13 +1093,19 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 amountIn,
         uint256 minAmountOut
     ) internal {
+        console.log("\n=== Execute optimal swap ===");
+        console.log("TokenIn:", tokenIn);
+        console.log("TokenOut:", tokenOut);
+        console.log("AmountIn:", amountIn);
         if (tokenIn == tokenOut || amountIn == 0) {
             return;
         }
         
         // Try direct swap first
         address directPool = _findBestPool(tokenIn, tokenOut);
+        console.log("Direct pool found:", directPool);
         if (directPool != address(0)) {
+            console.log("Using direct swap");
             _swapExactInput(tokenIn, tokenOut, amountIn, minAmountOut);
             return;
         }
@@ -1096,6 +1129,9 @@ contract AerodromeAtomicOperations is AtomicBase {
             address pool2 = _findBestPool(intermediate, tokenOut);
             
             if (pool1 != address(0) && pool2 != address(0)) {
+                console.log("Found 2-hop route through:", intermediate);
+                console.log("  Pool1:", pool1);
+                console.log("  Pool2:", pool2);
                 _swapExactInputMultihop(tokenIn, intermediate, tokenOut, amountIn, minAmountOut);
                 return;
             }
@@ -1145,6 +1181,12 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 amountIn,
         uint256 minAmountOut
     ) internal returns (uint256 amountOut) {
+        console.log("\n=== Multi-hop swap ===");
+        console.log("Path: TokenIn -> Intermediate -> TokenOut");
+        console.log("TokenIn:", tokenIn);
+        console.log("Intermediate:", tokenIntermediate);
+        console.log("TokenOut:", tokenOut);
+        console.log("AmountIn:", amountIn);
         _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
         
         // V3_SWAP_EXACT_IN command
@@ -1157,6 +1199,11 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint24 fee1 = CL_FACTORY.tickSpacingToFee(ICLPool(pool1).tickSpacing());
         uint24 fee2 = CL_FACTORY.tickSpacingToFee(ICLPool(pool2).tickSpacing());
         
+        console.log("Pool1:", pool1);
+        console.log("Pool1 fee:", fee1);
+        console.log("Pool2:", pool2);
+        console.log("Pool2 fee:", fee2);
+        
         // Encode multi-hop path
         inputs[0] = abi.encode(
             address(this),  // recipient
@@ -1164,7 +1211,7 @@ contract AerodromeAtomicOperations is AtomicBase {
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee1, tokenIntermediate, fee2, tokenOut),  // multi-hop path
             true,           // payerIsUser
-            false           // useSlipstreamPools (false = use UniV3 pools)
+            true            // useSlipstreamPools (true = use Slipstream/Aerodrome pools)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
@@ -1242,7 +1289,7 @@ contract AerodromeAtomicOperations is AtomicBase {
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee1, intermediate1, fee2, intermediate2, fee3, tokenOut),  // three-hop path
             true,           // payerIsUser
-            false           // useSlipstreamPools (false = use UniV3 pools)
+            true            // useSlipstreamPools (true = use Slipstream/Aerodrome pools)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
