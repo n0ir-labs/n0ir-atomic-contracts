@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "./AtomicBase.sol";
+import "./CDPWalletRegistry.sol";
 import "@interfaces/IUniversalRouter.sol";
 import "@interfaces/IPermit2.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
@@ -18,6 +19,9 @@ import "@interfaces/IERC20.sol";
  * @dev Provides atomic swap, mint, stake, and exit operations for Aerodrome CL pools
  */
 contract AerodromeAtomicOperations is AtomicBase {
+    /// @notice CDP Wallet Registry for access control
+    CDPWalletRegistry public immutable walletRegistry;
+    
     /// @notice Aerodrome Universal Router for token swaps
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
     /// @notice Permit2 contract for token approvals
@@ -100,6 +104,23 @@ contract AerodromeAtomicOperations is AtomicBase {
     );
     
     /**
+     * @notice Modifier to restrict access to CDP wallets only
+     */
+    modifier onlyCDPWallet() {
+        require(walletRegistry.isRegisteredWallet(msg.sender), "Not a CDP wallet");
+        _;
+    }
+    
+    /**
+     * @notice Constructor sets the CDP wallet registry
+     * @param _walletRegistry The address of the CDP wallet registry contract
+     */
+    constructor(address _walletRegistry) {
+        require(_walletRegistry != address(0), "Invalid registry address");
+        walletRegistry = CDPWalletRegistry(_walletRegistry);
+    }
+    
+    /**
      * @notice Parameters for swap and mint operations
      * @param pool The address of the Aerodrome CL pool
      * @param tickLower The lower tick boundary for the position
@@ -142,6 +163,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function swapMintAndStake(SwapMintParams calldata params) 
         external 
+        onlyCDPWallet
         nonReentrant 
         deadlineCheck(params.deadline)
         validAmount(params.usdcAmount)
@@ -216,6 +238,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function swapAndMint(SwapMintParams calldata params) 
         external 
+        onlyCDPWallet
         nonReentrant 
         deadlineCheck(params.deadline)
         validAmount(params.usdcAmount)
@@ -235,6 +258,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function fullExit(ExitParams calldata params)
         external
+        onlyCDPWallet
         nonReentrant
         deadlineCheck(params.deadline)
         returns (uint256 usdcOut, uint256 aeroRewards)
@@ -301,6 +325,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function claimAndSwap(uint256 tokenId, uint256 minUsdcOut, uint256 deadline)
         external
+        onlyCDPWallet
         nonReentrant
         deadlineCheck(deadline)
         returns (uint256 aeroAmount, uint256 usdcReceived)
@@ -340,6 +365,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function unstakeAndBurn(uint256 tokenId, uint256 deadline)
         external
+        onlyCDPWallet
         nonReentrant
         deadlineCheck(deadline)
         returns (uint256 amount0, uint256 amount1, uint256 aeroRewards)
