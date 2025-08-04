@@ -48,6 +48,8 @@ contract AerodromeAtomicOperations is AtomicBase {
     uint256 private constant SQRT_PRICE_LIMIT_X96 = 0;
     /// @notice Default slippage tolerance (1%)
     uint256 private constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
+    /// @notice Maximum allowed slippage tolerance (10%)
+    uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10%
     
     /**
      * @notice Emitted when a new position is opened
@@ -125,6 +127,20 @@ contract AerodromeAtomicOperations is AtomicBase {
     }
     
     /**
+     * @notice Gets the effective slippage to use for an operation
+     * @dev Returns user slippage if valid, otherwise returns default
+     * @param userSlippageBps The user-provided slippage in basis points
+     * @return The effective slippage to use
+     */
+    function _getEffectiveSlippage(uint256 userSlippageBps) internal pure returns (uint256) {
+        if (userSlippageBps == 0) {
+            return DEFAULT_SLIPPAGE_BPS;
+        }
+        require(userSlippageBps <= MAX_SLIPPAGE_BPS, "Slippage too high");
+        return userSlippageBps;
+    }
+    
+    /**
      * @notice Parameters for swap and mint operations
      * @param pool The address of the Aerodrome CL pool
      * @param tickLower The lower tick boundary for the position
@@ -133,6 +149,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @param minLiquidity The minimum amount of liquidity tokens to mint
      * @param deadline The deadline timestamp for the transaction
      * @param stake Whether to stake the position in the gauge after minting
+     * @param slippageBps Custom slippage tolerance in basis points (0 = use default)
      */
     struct SwapMintParams {
         address pool;
@@ -142,6 +159,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 minLiquidity;
         uint256 deadline;
         bool stake;
+        uint256 slippageBps;
     }
     
     /**
@@ -150,12 +168,14 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @param minUsdcOut The minimum amount of USDC to receive (if swapping)
      * @param deadline The deadline timestamp for the transaction
      * @param swapToUsdc Whether to swap all assets to USDC on exit
+     * @param slippageBps Custom slippage tolerance in basis points (0 = use default)
      */
     struct ExitParams {
         uint256 tokenId;
         uint256 minUsdcOut;
         uint256 deadline;
         bool swapToUsdc;
+        uint256 slippageBps;
     }
     
     /**
@@ -173,6 +193,17 @@ contract AerodromeAtomicOperations is AtomicBase {
         validAmount(params.usdcAmount)
         returns (uint256 tokenId, uint128 liquidity)
     {
+        return _swapMintAndStakeInternal(params);
+    }
+    
+    /**
+     * @notice Internal implementation of swap, mint, and stake
+     * @dev Shared logic for swapMintAndStake and swapAndMint
+     */
+    function _swapMintAndStakeInternal(SwapMintParams memory params) 
+        internal 
+        returns (uint256 tokenId, uint128 liquidity)
+    {
         _safeTransferFrom(USDC, msg.sender, address(this), params.usdcAmount);
         
         _validatePool(params.pool, address(CL_FACTORY));
@@ -183,6 +214,9 @@ contract AerodromeAtomicOperations is AtomicBase {
         int24 tickSpacing = pool.tickSpacing();
         
         _validateTickRange(params.tickLower, params.tickUpper, tickSpacing);
+        
+        // Get effective slippage for this operation
+        uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
         
         // Calculate how to split USDC optimally and perform swaps
         _performOptimalSwapsForLiquidity(
@@ -256,8 +290,8 @@ contract AerodromeAtomicOperations is AtomicBase {
         console.log("Minting with parameters:");
         console.log("  amount0Desired:", amount0Exact);
         console.log("  amount1Desired:", amount1Exact);
-        console.log("  amount0Min:", _calculateMinimumOutput(amount0Exact, DEFAULT_SLIPPAGE_BPS));
-        console.log("  amount1Min:", _calculateMinimumOutput(amount1Exact, DEFAULT_SLIPPAGE_BPS));
+        console.log("  amount0Min:", _calculateMinimumOutput(amount0Exact, effectiveSlippage));
+        console.log("  amount1Min:", _calculateMinimumOutput(amount1Exact, effectiveSlippage));
         
         try POSITION_MANAGER.mint(
             INonfungiblePositionManager.MintParams({
@@ -268,8 +302,8 @@ contract AerodromeAtomicOperations is AtomicBase {
                 tickUpper: params.tickUpper,
                 amount0Desired: amount0Exact,
                 amount1Desired: amount1Exact,
-                amount0Min: _calculateMinimumOutput(amount0Exact, DEFAULT_SLIPPAGE_BPS),
-                amount1Min: _calculateMinimumOutput(amount1Exact, DEFAULT_SLIPPAGE_BPS),
+                amount0Min: _calculateMinimumOutput(amount0Exact, effectiveSlippage),
+                amount1Min: _calculateMinimumOutput(amount1Exact, effectiveSlippage),
                 recipient: params.stake ? address(this) : msg.sender,
                 deadline: params.deadline,
                 sqrtPriceX96: 0
@@ -341,7 +375,7 @@ contract AerodromeAtomicOperations is AtomicBase {
     {
         SwapMintParams memory modifiedParams = params;
         modifiedParams.stake = false;
-        return this.swapMintAndStake(modifiedParams);
+        return _swapMintAndStakeInternal(modifiedParams);
     }
     
     /**
@@ -364,6 +398,9 @@ contract AerodromeAtomicOperations is AtomicBase {
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
         address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
         
+        // Get effective slippage for this operation
+        uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
+        
         if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId)) {
             IGauge(gauge).unstake(params.tokenId);
             aeroRewards = IERC20(AERO).balanceOf(address(this));
@@ -375,12 +412,33 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
         
+        // Calculate expected amounts based on liquidity and current prices
+        ICLPool clPool = ICLPool(pool);
+        (uint160 sqrtPriceX96,,,,,) = clPool.slot0();
+        
+        // Get position tick boundaries
+        (,,,,,int24 tickLower, int24 tickUpper,,,,,) = POSITION_MANAGER.positions(params.tokenId);
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        
+        // Calculate expected amounts for the liquidity
+        (uint256 expectedAmount0, uint256 expectedAmount1) = _getAmountsForLiquidity(
+            sqrtPriceX96,
+            sqrtRatioAX96,
+            sqrtRatioBX96,
+            liquidity
+        );
+        
+        // Apply slippage protection to expected amounts
+        uint256 amount0Min = _calculateMinimumOutput(expectedAmount0, effectiveSlippage);
+        uint256 amount1Min = _calculateMinimumOutput(expectedAmount1, effectiveSlippage);
+        
         (uint256 amount0, uint256 amount1) = POSITION_MANAGER.decreaseLiquidity(
             INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: params.tokenId,
                 liquidity: liquidity,
-                amount0Min: 0,
-                amount1Min: 0,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 deadline: params.deadline
             })
         );
@@ -397,7 +455,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         POSITION_MANAGER.burn(params.tokenId);
         
         if (params.swapToUsdc) {
-            usdcOut = _swapAllToUsdc(token0, token1, amount0, amount1, aeroRewards);
+            usdcOut = _swapAllToUsdc(token0, token1, amount0, amount1, aeroRewards, effectiveSlippage);
             require(usdcOut >= params.minUsdcOut, "Insufficient USDC output");
             _safeTransfer(USDC, msg.sender, usdcOut);
         } else {
@@ -454,15 +512,27 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @dev Returns the underlying tokens without swapping to USDC
      * @param tokenId The ID of the position to unstake and burn
      * @param deadline The deadline timestamp for the transaction
+     * @param slippageBps Custom slippage tolerance in basis points (0 = use default)
      * @return amount0 The amount of token0 returned
      * @return amount1 The amount of token1 returned
      * @return aeroRewards The amount of AERO rewards collected
      */
-    function unstakeAndBurn(uint256 tokenId, uint256 deadline)
+    function unstakeAndBurn(uint256 tokenId, uint256 deadline, uint256 slippageBps)
         external
         onlyCDPWallet
         nonReentrant
         deadlineCheck(deadline)
+        returns (uint256 amount0, uint256 amount1, uint256 aeroRewards)
+    {
+        return _unstakeAndBurnInternal(tokenId, deadline, slippageBps);
+    }
+    
+    /**
+     * @notice Internal implementation of unstake and burn
+     * @dev Shared logic for both unstakeAndBurn signatures
+     */
+    function _unstakeAndBurnInternal(uint256 tokenId, uint256 deadline, uint256 slippageBps)
+        internal
         returns (uint256 amount0, uint256 amount1, uint256 aeroRewards)
     {
         (,, address token0, address token1, int24 tickSpacing,, , uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
@@ -470,6 +540,9 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
         address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        
+        // Get effective slippage for this operation
+        uint256 effectiveSlippage = _getEffectiveSlippage(slippageBps);
         
         if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, tokenId)) {
             IGauge(gauge).unstake(tokenId);
@@ -482,12 +555,33 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), tokenId);
         
+        // Calculate expected amounts based on liquidity and current prices
+        ICLPool clPool = ICLPool(pool);
+        (uint160 sqrtPriceX96,,,,,) = clPool.slot0();
+        
+        // Get position tick boundaries
+        (,,,,,int24 tickLower, int24 tickUpper,,,,,) = POSITION_MANAGER.positions(tokenId);
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        
+        // Calculate expected amounts for the liquidity
+        (uint256 expectedAmount0, uint256 expectedAmount1) = _getAmountsForLiquidity(
+            sqrtPriceX96,
+            sqrtRatioAX96,
+            sqrtRatioBX96,
+            liquidity
+        );
+        
+        // Apply slippage protection to expected amounts
+        uint256 amount0Min = _calculateMinimumOutput(expectedAmount0, effectiveSlippage);
+        uint256 amount1Min = _calculateMinimumOutput(expectedAmount1, effectiveSlippage);
+        
         (amount0, amount1) = POSITION_MANAGER.decreaseLiquidity(
             INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: tokenId,
                 liquidity: liquidity,
-                amount0Min: 0,
-                amount1Min: 0,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 deadline: deadline
             })
         );
@@ -506,6 +600,25 @@ contract AerodromeAtomicOperations is AtomicBase {
         if (aeroRewards > 0) {
             _safeTransfer(AERO, msg.sender, aeroRewards);
         }
+    }
+    
+    /**
+     * @notice Backward compatibility wrapper for unstakeAndBurn without slippage
+     * @dev Uses default slippage tolerance
+     * @param tokenId The ID of the position to unstake and burn
+     * @param deadline The deadline timestamp for the transaction
+     * @return amount0 The amount of token0 returned
+     * @return amount1 The amount of token1 returned
+     * @return aeroRewards The amount of AERO rewards collected
+     */
+    function unstakeAndBurn(uint256 tokenId, uint256 deadline)
+        external
+        onlyCDPWallet
+        nonReentrant
+        deadlineCheck(deadline)
+        returns (uint256 amount0, uint256 amount1, uint256 aeroRewards)
+    {
+        return _unstakeAndBurnInternal(tokenId, deadline, 0); // 0 = use default slippage
     }
     
     /**
@@ -721,6 +834,7 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @param amount0 The amount of token0 to swap
      * @param amount1 The amount of token1 to swap
      * @param aeroAmount The amount of AERO to swap
+     * @param slippageBps The slippage tolerance in basis points
      * @return totalUsdc The total USDC received from all swaps
      */
     function _swapAllToUsdc(
@@ -728,22 +842,32 @@ contract AerodromeAtomicOperations is AtomicBase {
         address token1,
         uint256 amount0,
         uint256 amount1,
-        uint256 aeroAmount
+        uint256 aeroAmount,
+        uint256 slippageBps
     ) internal returns (uint256 totalUsdc) {
         if (token0 == USDC) {
             totalUsdc += amount0;
         } else if (amount0 > 0) {
-            totalUsdc += _swapExactInput(token0, USDC, amount0, 0, _getTickSpacingForPair(token0, USDC));
+            // Calculate minimum output with slippage protection
+            uint256 expectedOut = _quoteUSDCFromToken(token0, amount0);
+            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
+            totalUsdc += _swapExactInput(token0, USDC, amount0, minOut, _getTickSpacingForPair(token0, USDC));
         }
         
         if (token1 == USDC) {
             totalUsdc += amount1;
         } else if (amount1 > 0) {
-            totalUsdc += _swapExactInput(token1, USDC, amount1, 0, _getTickSpacingForPair(token1, USDC));
+            // Calculate minimum output with slippage protection
+            uint256 expectedOut = _quoteUSDCFromToken(token1, amount1);
+            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
+            totalUsdc += _swapExactInput(token1, USDC, amount1, minOut, _getTickSpacingForPair(token1, USDC));
         }
         
         if (aeroAmount > 0) {
-            totalUsdc += _swapExactInput(AERO, USDC, aeroAmount, 0, _getTickSpacingForPair(AERO, USDC));
+            // Calculate minimum output with slippage protection
+            uint256 expectedOut = _quoteUSDCFromToken(AERO, aeroAmount);
+            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
+            totalUsdc += _swapExactInput(AERO, USDC, aeroAmount, minOut, _getTickSpacingForPair(AERO, USDC));
         }
     }
     
@@ -1081,6 +1205,86 @@ contract AerodromeAtomicOperations is AtomicBase {
         result = prod0 * inv;
     }
     
+    /**
+     * @notice Quotes the amount of USDC received for a given token amount
+     * @dev Uses the quoter to simulate swaps and get expected outputs
+     * @param token The token to swap from
+     * @param tokenAmount The amount of token to swap
+     * @return usdcOut The expected amount of USDC received
+     */
+    function _quoteUSDCFromToken(address token, uint256 tokenAmount) internal view returns (uint256 usdcOut) {
+        if (token == USDC) {
+            return tokenAmount;
+        }
+        
+        // Try direct token -> USDC swap
+        address directPool = _findBestPool(token, USDC);
+        if (directPool != address(0)) {
+            // Use staticcall to maintain view function
+            bytes memory data = abi.encodeWithSelector(
+                IMixedQuoter.quoteExactInputSingle.selector,
+                IMixedQuoter.QuoteExactInputSingleParams({
+                    tokenIn: token,
+                    tokenOut: USDC,
+                    amountIn: tokenAmount,
+                    tickSpacing: ICLPool(directPool).tickSpacing(),
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            
+            (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+            if (success && result.length >= 32) {
+                (usdcOut,,,) = abi.decode(result, (uint256, uint160, uint32, uint256));
+                return usdcOut;
+            }
+        }
+        
+        // Try multi-hop through common intermediate tokens
+        address[5] memory intermediates = [
+            WETH,
+            USDC, 
+            AERO,
+            0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA, // USDbC
+            0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22  // cbETH
+        ];
+        
+        for (uint256 i = 0; i < intermediates.length; i++) {
+            address intermediate = intermediates[i];
+            if (intermediate == USDC || intermediate == token) {
+                continue;
+            }
+            
+            address pool1 = _findBestPool(token, intermediate);
+            address pool2 = _findBestPool(intermediate, USDC);
+            
+            if (pool1 != address(0) && pool2 != address(0)) {
+                bytes memory path = abi.encodePacked(
+                    token,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(pool1).tickSpacing()),
+                    intermediate,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(pool2).tickSpacing()),
+                    USDC
+                );
+                
+                bytes memory data = abi.encodeWithSelector(
+                    IMixedQuoter.quoteExactInput.selector,
+                    path,
+                    tokenAmount
+                );
+                
+                (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+                if (success && result.length >= 32) {
+                    (usdcOut,,,) = abi.decode(result, (uint256, uint160[], uint32[], uint256));
+                    return usdcOut;
+                }
+            }
+        }
+        
+        // If quote fails, return a conservative estimate (50% of input amount)
+        // This ensures we still have slippage protection even if quoter fails
+        return tokenAmount / 2;
+    }
+
     /**
      * @notice Quotes the amount of tokens received for a given USDC amount
      * @dev Uses the quoter to simulate swaps and get expected outputs

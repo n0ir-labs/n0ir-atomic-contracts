@@ -81,7 +81,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: true
+            stake: true,
+            slippageBps: 0 // Use default slippage
         });
         
         uint256 balanceBefore = IERC20(USDC).balanceOf(USER);
@@ -105,7 +106,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         (uint256 tokenId, uint128 liquidity) = atomic.swapAndMint(params);
@@ -129,7 +131,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         (uint256 tokenId,) = atomic.swapAndMint(mintParams);
@@ -143,7 +146,8 @@ contract AerodromeAtomicOperationsTest is Test {
             tokenId: tokenId,
             minUsdcOut: 900e6,
             deadline: block.timestamp + 1 hours,
-            swapToUsdc: true
+            swapToUsdc: true,
+            slippageBps: 0 // Use default slippage
         });
         
         (uint256 usdcOut,) = atomic.fullExit(exitParams);
@@ -167,7 +171,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         vm.expectRevert();
@@ -186,7 +191,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp - 1,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         vm.expectRevert();
@@ -205,7 +211,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 0,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         vm.expectRevert();
@@ -224,7 +231,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 1000e6,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: true
+            stake: true,
+            slippageBps: 0 // Use default slippage
         });
         
         (uint256 tokenId,) = atomic.swapMintAndStake(params);
@@ -261,7 +269,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: amount,
             minLiquidity: 1,
             deadline: block.timestamp + 1 hours,
-            stake: false
+            stake: false,
+            slippageBps: 0 // Use default slippage
         });
         
         (uint256 tokenId, uint128 liquidity) = atomic.swapAndMint(params);
@@ -309,7 +318,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: usdcAmount,
             minLiquidity: 0, // Accept any liquidity for testing
             deadline: block.timestamp + 3600,
-            stake: false // Changed to false - this pool might not have a gauge
+            stake: false, // Changed to false - this pool might not have a gauge
+            slippageBps: 0 // Use default slippage
         });
         
         // Execute swap, mint and stake
@@ -395,7 +405,8 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: usdcAmount,
             minLiquidity: 0,
             deadline: block.timestamp + 3600,
-            stake: false // Don't stake for these tests
+            stake: false, // Don't stake for these tests
+            slippageBps: 0 // Use default slippage
         });
         
         try atomic.swapMintAndStake(params) returns (uint256 tokenId, uint128 liquidity) {
