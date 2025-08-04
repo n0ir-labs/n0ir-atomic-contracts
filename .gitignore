@@ -13,6 +13,9 @@ docs/
 # Dotenv file
 .env
 
+# Dependencies
+lib/
+
 # Node modules
 node_modules/
 
