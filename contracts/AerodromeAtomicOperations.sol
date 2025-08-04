@@ -184,7 +184,8 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         _validateTickRange(params.tickLower, params.tickUpper, tickSpacing);
         
-        (uint256 amount0Desired, uint256 amount1Desired) = _calculateOptimalAmounts(
+        // Calculate how to split USDC optimally and perform swaps
+        _performOptimalSwapsForLiquidity(
             token0,
             token1,
             params.usdcAmount,
@@ -193,20 +194,11 @@ contract AerodromeAtomicOperations is AtomicBase {
             params.pool
         );
         
-        _performSwapsForLiquidity(
-            token0,
-            token1,
-            amount0Desired,
-            amount1Desired
-        );
-        
         // Get actual balances after swaps
         uint256 actualBalance0 = IERC20(token0).balanceOf(address(this));
         uint256 actualBalance1 = IERC20(token1).balanceOf(address(this));
         
         console.log("\\n=== Minting position ===");
-        console.log("Amount0 desired:", amount0Desired);
-        console.log("Amount1 desired:", amount1Desired);
         console.log("Actual balance0:", actualBalance0);
         console.log("Actual balance1:", actualBalance1);
         
@@ -214,7 +206,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         _safeApprove(token0, address(POSITION_MANAGER), actualBalance0);
         _safeApprove(token1, address(POSITION_MANAGER), actualBalance1);
         
-        (tokenId, liquidity,,) = POSITION_MANAGER.mint(
+        try POSITION_MANAGER.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
                 token1: token1,
@@ -501,25 +493,36 @@ contract AerodromeAtomicOperations is AtomicBase {
     }
     
     /**
-     * @notice Performs necessary swaps from USDC to get required token amounts
-     * @dev Intelligently routes swaps through optimal paths
+     * @notice Performs optimal swaps from USDC to get required tokens for liquidity
+     * @dev Calculates optimal split and routes swaps through best paths
      * @param token0 The address of token0
      * @param token1 The address of token1
-     * @param amount0Needed The amount of token0 needed
-     * @param amount1Needed The amount of token1 needed
+     * @param usdcAmount The total USDC amount
+     * @param tickLower The lower tick
+     * @param tickUpper The upper tick
+     * @param pool The pool address
      */
-    function _performSwapsForLiquidity(
+    function _performOptimalSwapsForLiquidity(
         address token0,
         address token1,
-        uint256 amount0Needed,
-        uint256 amount1Needed
+        uint256 usdcAmount,
+        int24 tickLower,
+        int24 tickUpper,
+        address pool
     ) internal {
         // Log what we're trying to do
-        console.log("=== Performing swaps for liquidity ===");
+        console.log("=== Performing optimal swaps for liquidity ===");
         console.log("Token0:", token0);
         console.log("Token1:", token1);
-        console.log("Amount0 needed:", amount0Needed);
-        console.log("Amount1 needed:", amount1Needed);
+        console.log("USDC amount:", usdcAmount);
+        
+        // Get pool price to determine optimal split
+        ICLPool clPool = ICLPool(pool);
+        (uint160 sqrtPriceX96,,,,,) = clPool.slot0();
+        
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        
         uint256 totalUSDC = IERC20(USDC).balanceOf(address(this));
         
         // Handle special cases
@@ -529,58 +532,85 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         if (token0 == USDC) {
             // Only swap for token1
-            if (amount1Needed > 0) {
-                // Use most of the USDC for token1, keeping some for token0
-                uint256 usdcForToken1 = (totalUSDC * amount1Needed) / (amount0Needed + amount1Needed);
-                _executeOptimalSwap(USDC, token1, usdcForToken1, 0);
+            if (sqrtPriceX96 >= sqrtRatioBX96) {
+                // Above range, don't need token0 (USDC)
+                _executeOptimalSwap(USDC, token1, totalUSDC, 0);
+            } else if (sqrtPriceX96 > sqrtRatioAX96) {
+                // In range, need both tokens
+                uint256 priceRatio = ((uint256(sqrtPriceX96) - uint256(sqrtRatioAX96)) * 1e18) / 
+                                     (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
+                uint256 usdcForToken1 = (totalUSDC * priceRatio) / 1e18;
+                if (usdcForToken1 > 0) {
+                    _executeOptimalSwap(USDC, token1, usdcForToken1, 0);
+                }
             }
+            // If below range, keep all USDC as token0
             return;
         }
         
         if (token1 == USDC) {
             // Only swap for token0
-            if (amount0Needed > 0) {
-                // Use most of the USDC for token0, keeping some for token1
-                uint256 usdcForToken0 = (totalUSDC * amount0Needed) / (amount0Needed + amount1Needed);
-                _executeOptimalSwap(USDC, token0, usdcForToken0, 0);
+            if (sqrtPriceX96 <= sqrtRatioAX96) {
+                // Below range, don't need token1 (USDC)
+                _executeOptimalSwap(USDC, token0, totalUSDC, 0);
+            } else if (sqrtPriceX96 < sqrtRatioBX96) {
+                // In range, need both tokens
+                uint256 priceRatio = ((uint256(sqrtPriceX96) - uint256(sqrtRatioAX96)) * 1e18) / 
+                                     (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
+                uint256 usdcForToken0 = totalUSDC - ((totalUSDC * priceRatio) / 1e18);
+                if (usdcForToken0 > 0) {
+                    _executeOptimalSwap(USDC, token0, usdcForToken0, 0);
+                }
             }
+            // If above range, keep all USDC as token1
             return;
         }
         
-        // Neither token is USDC - need to swap for both
-        // First, check what portion of USDC we need for each token based on the amounts
+        // Neither token is USDC - calculate optimal split based on tick position
         uint256 usdcForToken0;
         uint256 usdcForToken1;
         
-        // Try to quote amounts needed - if it fails, use a simple split
-        try this.estimateUSDCSplit(token0, token1, amount0Needed, amount1Needed, totalUSDC) 
-            returns (uint256 usdc0, uint256 usdc1) {
-            usdcForToken0 = usdc0;
-            usdcForToken1 = usdc1;
-        } catch {
-            // Fallback: split proportionally based on amounts needed
-            if (amount0Needed == 0) {
-                usdcForToken0 = 0;
-                usdcForToken1 = totalUSDC;
-            } else if (amount1Needed == 0) {
-                usdcForToken0 = totalUSDC;
-                usdcForToken1 = 0;
-            } else {
-                // Split 50/50 as a simple fallback
-                usdcForToken0 = totalUSDC / 2;
-                usdcForToken1 = totalUSDC - usdcForToken0;
-            }
+        // Calculate split based on position in range
+        if (sqrtPriceX96 <= sqrtRatioAX96) {
+            // Below range - 100% token0
+            usdcForToken0 = totalUSDC;
+            usdcForToken1 = 0;
+            console.log("Position below range - 100% token0");
+        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
+            // Above range - 100% token1
+            usdcForToken0 = 0;
+            usdcForToken1 = totalUSDC;
+            console.log("Position above range - 100% token1");
+        } else {
+            // In range - calculate optimal split
+            uint256 sqrtPrice = uint256(sqrtPriceX96);
+            uint256 sqrtPriceLower = uint256(sqrtRatioAX96);
+            uint256 sqrtPriceUpper = uint256(sqrtRatioBX96);
+            
+            // Calculate value ratio based on position in range
+            // This is a simplified calculation - in production you'd want more sophisticated math
+            uint256 priceRatio = ((sqrtPrice - sqrtPriceLower) * 1e18) / (sqrtPriceUpper - sqrtPriceLower);
+            
+            // Split USDC based on the price ratio
+            usdcForToken1 = (totalUSDC * priceRatio) / 1e18;
+            usdcForToken0 = totalUSDC - usdcForToken1;
+            
+            console.log("Position in range - splitting USDC");
+            console.log("Price ratio (1e18):", priceRatio);
         }
         
+        console.log("USDC for token0:", usdcForToken0);
+        console.log("USDC for token1:", usdcForToken1);
+        
         // Execute swaps
-        if (usdcForToken0 > 0 && amount0Needed > 0) {
-            console.log("Swapping USDC for token0:");
+        if (usdcForToken0 > 0) {
+            console.log("\\nSwapping USDC for token0:");
             console.log("  USDC amount:", usdcForToken0);
             _executeOptimalSwap(USDC, token0, usdcForToken0, 0);
         }
         
-        if (usdcForToken1 > 0 && amount1Needed > 0) {
-            // Use remaining USDC for token1
+        if (usdcForToken1 > 0) {
+            // Use remaining USDC for token1 to account for any slippage
             uint256 remainingUSDC = IERC20(USDC).balanceOf(address(this));
             console.log("\\nSwapping remaining USDC for token1:");
             console.log("  Remaining USDC:", remainingUSDC);
