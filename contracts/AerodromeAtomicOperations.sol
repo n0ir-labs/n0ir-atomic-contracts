@@ -206,6 +206,59 @@ contract AerodromeAtomicOperations is AtomicBase {
         _safeApprove(token0, address(POSITION_MANAGER), actualBalance0);
         _safeApprove(token1, address(POSITION_MANAGER), actualBalance1);
         
+        // Calculate the maximum liquidity we can mint with our actual balances
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(params.pool).slot0();
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(params.tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(params.tickUpper);
+        
+        console.log("Calculating liquidity with:");
+        console.log("  sqrtPriceX96:", sqrtPriceX96);
+        console.log("  sqrtRatioAX96:", sqrtRatioAX96);
+        console.log("  sqrtRatioBX96:", sqrtRatioBX96);
+        
+        uint256 calculatedLiquidity = _getLiquidityForAmounts(
+            sqrtPriceX96,
+            sqrtRatioAX96,
+            sqrtRatioBX96,
+            actualBalance0,
+            actualBalance1
+        );
+        
+        console.log("Calculated liquidity:", calculatedLiquidity);
+        
+        // Now calculate the exact amounts needed for this liquidity
+        // Apply a small buffer (99%) to avoid rounding issues
+        
+        // Check if liquidity fits in uint128
+        uint256 maxUint128 = type(uint128).max;
+        console.log("Max uint128:", maxUint128);
+        
+        require(calculatedLiquidity <= maxUint128, "Liquidity exceeds uint128 max");
+        
+        uint128 adjustedLiquidity = uint128((calculatedLiquidity * 99) / 100);
+        
+        console.log("Adjusted liquidity:", adjustedLiquidity);
+        
+        (uint256 amount0Exact, uint256 amount1Exact) = _getAmountsForLiquidity(
+            sqrtPriceX96,
+            sqrtRatioAX96,
+            sqrtRatioBX96,
+            adjustedLiquidity
+        );
+        
+        console.log("Exact amounts needed:");
+        console.log("  Amount0:", amount0Exact);
+        console.log("  Amount1:", amount1Exact);
+        
+        // Use the exact amounts (which should be <= our balances)
+        uint128 mintedLiquidity;
+        
+        console.log("Minting with parameters:");
+        console.log("  amount0Desired:", amount0Exact);
+        console.log("  amount1Desired:", amount1Exact);
+        console.log("  amount0Min:", _calculateMinimumOutput(amount0Exact, DEFAULT_SLIPPAGE_BPS));
+        console.log("  amount1Min:", _calculateMinimumOutput(amount1Exact, DEFAULT_SLIPPAGE_BPS));
+        
         try POSITION_MANAGER.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -213,27 +266,62 @@ contract AerodromeAtomicOperations is AtomicBase {
                 tickSpacing: tickSpacing,
                 tickLower: params.tickLower,
                 tickUpper: params.tickUpper,
-                amount0Desired: actualBalance0,
-                amount1Desired: actualBalance1,
-                amount0Min: _calculateMinimumOutput(actualBalance0, DEFAULT_SLIPPAGE_BPS),
-                amount1Min: _calculateMinimumOutput(actualBalance1, DEFAULT_SLIPPAGE_BPS),
+                amount0Desired: amount0Exact,
+                amount1Desired: amount1Exact,
+                amount0Min: _calculateMinimumOutput(amount0Exact, DEFAULT_SLIPPAGE_BPS),
+                amount1Min: _calculateMinimumOutput(amount1Exact, DEFAULT_SLIPPAGE_BPS),
                 recipient: params.stake ? address(this) : msg.sender,
                 deadline: params.deadline,
                 sqrtPriceX96: 0
             })
-        );
+        ) returns (uint256 _tokenId, uint128 _liquidity, uint256 amount0Used, uint256 amount1Used) {
+            tokenId = _tokenId;
+            mintedLiquidity = _liquidity;
+            console.log("Mint successful!");
+            console.log("  TokenId:", tokenId);
+            console.log("  Liquidity:", mintedLiquidity);
+            console.log("  Amount0 used:", amount0Used);
+            console.log("  Amount1 used:", amount1Used);
+        } catch Error(string memory reason) {
+            console.log("Mint failed with reason:", reason);
+            revert(reason);
+        } catch (bytes memory data) {
+            console.log("Mint failed with data length:", data.length);
+            if (data.length >= 4) {
+                bytes4 selector;
+                assembly {
+                    selector := mload(add(data, 0x20))
+                }
+                console.logBytes4(selector);
+            }
+            revert("Mint failed");
+        }
         
+        liquidity = mintedLiquidity;
         require(liquidity >= params.minLiquidity, "Insufficient liquidity minted");
         
         if (params.stake) {
+            console.log("\\nStaking position...");
             address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(params.pool);
+            console.log("Gauge address:", gauge);
             require(gauge != address(0), "No gauge found for pool");
             
+            console.log("Approving gauge for tokenId:", tokenId);
             POSITION_MANAGER.approve(gauge, tokenId);
-            IGauge(gauge).stake(tokenId);
+            
+            console.log("Staking tokenId:", tokenId);
+            try IGauge(gauge).stake(tokenId) {
+                console.log("Staking successful!");
+            } catch Error(string memory reason) {
+                console.log("Staking failed with reason:", reason);
+                revert(reason);
+            } catch (bytes memory data) {
+                console.log("Staking failed with data");
+                revert("Staking failed");
+            }
         }
         
-        emit PositionOpened(msg.sender, tokenId, params.pool, params.usdcAmount, liquidity, params.stake);
+        emit PositionOpened(msg.sender, tokenId, params.pool, params.usdcAmount, uint128(liquidity), params.stake);
     }
     
     /**
@@ -832,8 +920,12 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 amount0
     ) internal pure returns (uint256 liquidity) {
         if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
-        uint256 intermediate = mulDiv(sqrtRatioAX96, sqrtRatioBX96, 1 << 96);
-        liquidity = mulDiv(amount0, intermediate, sqrtRatioBX96 - sqrtRatioAX96);
+        
+        // Check for underflow
+        require(sqrtRatioBX96 > sqrtRatioAX96, "Invalid sqrt ratios");
+        
+        uint256 intermediate = mulDiv(uint256(sqrtRatioAX96), uint256(sqrtRatioBX96), 1 << 96);
+        liquidity = mulDiv(amount0, intermediate, uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
     }
     
     function _getLiquidityForAmount1(
@@ -850,17 +942,28 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint160 sqrtRatioAX96,
         uint160 sqrtRatioBX96,
         uint128 liquidity
-    ) internal pure returns (uint256 amount0, uint256 amount1) {
+    ) internal view returns (uint256 amount0, uint256 amount1) {
+        console.log("_getAmountsForLiquidity called with:");
+        console.log("  liquidity:", liquidity);
+        
         if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
         
         if (sqrtRatioX96 <= sqrtRatioAX96) {
+            console.log("Price below range - calculating amount0 only");
             amount0 = _getAmount0ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity);
         } else if (sqrtRatioX96 < sqrtRatioBX96) {
+            console.log("Price in range - calculating both amounts");
             amount0 = _getAmount0ForLiquidity(sqrtRatioX96, sqrtRatioBX96, liquidity);
+            // Note: sqrtRatioX96 is the upper bound for amount1 calculation when in range
             amount1 = _getAmount1ForLiquidity(sqrtRatioAX96, sqrtRatioX96, liquidity);
         } else {
+            console.log("Price above range - calculating amount1 only");
             amount1 = _getAmount1ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity);
         }
+        
+        console.log("Calculated amounts:");
+        console.log("  amount0:", amount0);
+        console.log("  amount1:", amount1);
     }
     
     function _getAmount0ForLiquidity(
@@ -869,11 +972,18 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint128 liquidity
     ) internal pure returns (uint256 amount0) {
         if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
-        amount0 = mulDiv(
-            uint256(liquidity) << 96,
-            sqrtRatioBX96 - sqrtRatioAX96,
-            sqrtRatioBX96
-        ) / sqrtRatioAX96;
+        
+        // Calculate amount0 = liquidity * (sqrtRatioBX96 - sqrtRatioAX96) / (sqrtRatioAX96 * sqrtRatioBX96 / 2^96)
+        // Rearranged to avoid overflow: amount0 = (liquidity * 2^96 * (sqrtRatioBX96 - sqrtRatioAX96)) / (sqrtRatioAX96 * sqrtRatioBX96)
+        
+        uint256 numerator1 = uint256(liquidity);
+        uint256 numerator2 = uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96);
+        uint256 denominator = uint256(sqrtRatioAX96);
+        
+        // First divide by sqrtRatioAX96 to prevent overflow
+        amount0 = mulDiv(numerator1, numerator2, denominator);
+        // Then multiply by 2^96 and divide by sqrtRatioBX96
+        amount0 = mulDiv(amount0, 1 << 96, uint256(sqrtRatioBX96));
     }
     
     function _getAmount1ForLiquidity(
@@ -882,7 +992,11 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint128 liquidity
     ) internal pure returns (uint256 amount1) {
         if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
-        amount1 = mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, 1 << 96);
+        
+        // Check for underflow
+        require(sqrtRatioBX96 >= sqrtRatioAX96, "Invalid sqrt ratio order");
+        
+        amount1 = mulDiv(uint256(liquidity), uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96), 1 << 96);
     }
     
     /**
