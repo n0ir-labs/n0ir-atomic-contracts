@@ -8,6 +8,7 @@ import "@interfaces/IERC20.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
 import "@interfaces/IGauge.sol";
 import "@interfaces/ICLFactory.sol";
+import "@interfaces/ICLPool.sol";
 
 contract AerodromeAtomicOperationsTest is Test {
     AerodromeAtomicOperations public atomic;
@@ -20,16 +21,20 @@ contract AerodromeAtomicOperationsTest is Test {
     address constant USDC_WHALE = 0x0000000000000000000000000000000000000001;
     address constant USER = address(0x1337);
     
+    // Test with the specific pool requested
+    address constant TEST_POOL = 0x4A021bA3ab1F0121e7DF76f345C547db86Cb3468;
+    
     uint256 baseMainnetFork;
     address testPool;
     
     function setUp() public {
-        string memory rpcUrl = vm.envString("BASE_RPC_URL");
-        baseMainnetFork = vm.createFork(rpcUrl);
+        // Use direct RPC URL instead of env variable
+        baseMainnetFork = vm.createFork("https://mainnet.base.org");
         vm.selectFork(baseMainnetFork);
         
         // Deploy wallet registry and register USER as a CDP wallet
         walletRegistry = new CDPWalletRegistry();
+        // As the owner, register USER as a CDP wallet
         walletRegistry.registerWallet(USER);
         
         // Deploy atomic operations contract with wallet registry
@@ -263,6 +268,149 @@ contract AerodromeAtomicOperationsTest is Test {
         
         assertGt(tokenId, 0, "Should receive valid tokenId");
         assertGt(liquidity, 0, "Should receive liquidity");
+        
+        vm.stopPrank();
+    }
+    
+    function testSpecificPoolSwapMintAndStake() public {
+        // Test with the specific pool address: 0x4A021bA3ab1F0121e7DF76f345C547db86Cb3468
+        // Get pool info
+        ICLPool pool = ICLPool(TEST_POOL);
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        int24 tickSpacing = pool.tickSpacing();
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = pool.slot0();
+        
+        console.log("Testing specific pool:", TEST_POOL);
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
+        console.log("Current tick:", currentTick);
+        console.log("Tick spacing:", tickSpacing);
+        
+        // Calculate tick range around current price (± 5%)
+        int24 tickRange = 500; // Approximately 5% range
+        int24 tickLower = ((currentTick - tickRange) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + tickRange) / tickSpacing) * tickSpacing;
+        
+        console.log("Tick lower:", tickLower);
+        console.log("Tick upper:", tickUpper);
+        
+        uint256 usdcAmount = 1000e6; // 1,000 USDC
+        
+        // Approve USDC
+        vm.startPrank(USER);
+        IERC20(USDC).approve(address(atomic), usdcAmount);
+        
+        // Setup swap parameters
+        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+            pool: TEST_POOL,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            usdcAmount: usdcAmount,
+            minLiquidity: 0, // Accept any liquidity for testing
+            deadline: block.timestamp + 3600,
+            stake: true
+        });
+        
+        // Execute swap, mint and stake
+        console.log("Executing swapMintAndStake with 1000 USDC");
+        (uint256 tokenId, uint128 liquidity) = atomic.swapMintAndStake(params);
+        vm.stopPrank();
+        
+        // Verify results
+        assertGt(tokenId, 0, "Should have minted a position");
+        assertGt(liquidity, 0, "Should have minted liquidity");
+        
+        console.log("Success! Token ID:", tokenId);
+        console.log("Liquidity minted:", liquidity);
+        
+        // Verify position details
+        INonfungiblePositionManager positionManager = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
+        
+        (
+            ,
+            ,
+            address posToken0,
+            address posToken1,
+            int24 posTickSpacing,
+            int24 posTickLower,
+            int24 posTickUpper,
+            uint128 posLiquidity,
+            ,
+            ,
+            ,
+            
+        ) = positionManager.positions(tokenId);
+        
+        assertEq(posToken0, token0, "Token0 should match");
+        assertEq(posToken1, token1, "Token1 should match");
+        assertEq(posTickLower, tickLower, "Tick lower should match");
+        assertEq(posTickUpper, tickUpper, "Tick upper should match");
+        assertEq(posLiquidity, liquidity, "Liquidity should match");
+        
+        console.log("Position verified successfully!");
+    }
+    
+    function testSpecificPoolDifferentRanges() public {
+        ICLPool pool = ICLPool(TEST_POOL);
+        int24 tickSpacing = pool.tickSpacing();
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = pool.slot0();
+        
+        console.log("Testing different ranges for pool:", TEST_POOL);
+        console.log("Current tick:", currentTick);
+        
+        // Test with position below current price (100% token0)
+        int24 tickLower = ((currentTick - 5000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick - 2000) / tickSpacing) * tickSpacing;
+        
+        _testSpecificPoolWithRange(tickLower, tickUpper, "Below range position");
+        
+        // Test with position above current price (100% token1)
+        tickLower = ((currentTick + 2000) / tickSpacing) * tickSpacing;
+        tickUpper = ((currentTick + 5000) / tickSpacing) * tickSpacing;
+        
+        _testSpecificPoolWithRange(tickLower, tickUpper, "Above range position");
+        
+        // Test with narrow range around current price
+        tickLower = ((currentTick - 100) / tickSpacing) * tickSpacing;
+        tickUpper = ((currentTick + 100) / tickSpacing) * tickSpacing;
+        
+        _testSpecificPoolWithRange(tickLower, tickUpper, "Narrow range position");
+    }
+    
+    function _testSpecificPoolWithRange(int24 tickLower, int24 tickUpper, string memory description) internal {
+        console.log("\nTesting:", description);
+        console.log("Tick lower:", tickLower);
+        console.log("Tick upper:", tickUpper);
+        
+        uint256 usdcAmount = 100e6; // 100 USDC
+        
+        vm.startPrank(USER);
+        IERC20(USDC).approve(address(atomic), usdcAmount);
+        
+        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+            pool: TEST_POOL,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            usdcAmount: usdcAmount,
+            minLiquidity: 0,
+            deadline: block.timestamp + 3600,
+            stake: false // Don't stake for these tests
+        });
+        
+        try atomic.swapMintAndStake(params) returns (uint256 tokenId, uint128 liquidity) {
+            console.log("Token ID:", tokenId);
+            console.log("Liquidity:", liquidity);
+            
+            assertGt(tokenId, 0, "Should have minted a position");
+            assertGt(liquidity, 0, "Should have minted liquidity");
+        } catch Error(string memory reason) {
+            console.log("Failed with reason:", reason);
+            fail(reason);
+        } catch (bytes memory data) {
+            console.log("Failed with data");
+            fail("Unknown error");
+        }
         
         vm.stopPrank();
     }

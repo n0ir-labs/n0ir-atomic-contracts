@@ -437,30 +437,56 @@ contract AerodromeAtomicOperations is AtomicBase {
         address pool
     ) internal view returns (uint256 amount0, uint256 amount1) {
         ICLPool clPool = ICLPool(pool);
-        (uint160 sqrtPriceX96, int24 currentTick,,,,) = clPool.slot0();
+        (uint160 sqrtPriceX96,,,,,) = clPool.slot0();
         
         uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
         uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
-        uint256 liquidity = _getLiquidityForAmounts(
-            sqrtPriceX96,
-            sqrtRatioAX96,
-            sqrtRatioBX96,
-            usdcAmount / 2,
-            usdcAmount / 2
-        );
-        
-        (amount0, amount1) = _getAmountsForLiquidity(
-            sqrtPriceX96,
-            sqrtRatioAX96,
-            sqrtRatioBX96,
-            uint128(liquidity)
-        );
+        // Calculate token weights based on position in range
+        if (sqrtPriceX96 <= sqrtRatioAX96) {
+            // Below range - 100% token0
+            // Need to convert all USDC to token0
+            amount0 = _quoteUSDCToToken(token0, usdcAmount);
+            amount1 = 0;
+        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
+            // Above range - 100% token1
+            // Need to convert all USDC to token1
+            amount0 = 0;
+            amount1 = _quoteUSDCToToken(token1, usdcAmount);
+        } else {
+            // In range - calculate optimal split
+            uint256 sqrtPrice = uint256(sqrtPriceX96);
+            uint256 sqrtPriceLower = uint256(sqrtRatioAX96);
+            uint256 sqrtPriceUpper = uint256(sqrtRatioBX96);
+            
+            // Calculate price ratio in range (0 to 1e18)
+            uint256 priceRatioNumerator = sqrtPrice - sqrtPriceLower;
+            uint256 priceRatioDenominator = sqrtPriceUpper - sqrtPriceLower;
+            uint256 token1Portion = priceRatioNumerator * 1e18 / priceRatioDenominator;
+            uint256 token0Portion = 1e18 - token1Portion;
+            
+            // Calculate USDC allocation for each token
+            uint256 usdcForToken0 = usdcAmount * token0Portion / 1e18;
+            uint256 usdcForToken1 = usdcAmount * token1Portion / 1e18;
+            
+            // Quote the amounts we'll get after swap
+            if (token0 == USDC) {
+                amount0 = usdcForToken0;
+            } else {
+                amount0 = _quoteUSDCToToken(token0, usdcForToken0);
+            }
+            
+            if (token1 == USDC) {
+                amount1 = usdcForToken1;
+            } else {
+                amount1 = _quoteUSDCToToken(token1, usdcForToken1);
+            }
+        }
     }
     
     /**
      * @notice Performs necessary swaps from USDC to get required token amounts
-     * @dev Swaps USDC to token0 and/or token1 as needed
+     * @dev Intelligently routes swaps through direct paths or WETH when needed
      * @param token0 The address of token0
      * @param token1 The address of token1
      * @param amount0Needed The amount of token0 needed
@@ -472,12 +498,47 @@ contract AerodromeAtomicOperations is AtomicBase {
         uint256 amount0Needed,
         uint256 amount1Needed
     ) internal {
+        // Calculate USDC needed for each token
+        uint256 usdcForToken0 = 0;
+        uint256 usdcForToken1 = 0;
+        
         if (token0 != USDC && amount0Needed > 0) {
-            _swapExactOutput(USDC, token0, amount0Needed, IERC20(USDC).balanceOf(address(this)));
+            usdcForToken0 = _getUSDCNeededForToken(token0, amount0Needed);
         }
         
         if (token1 != USDC && amount1Needed > 0) {
-            _swapExactOutput(USDC, token1, amount1Needed, IERC20(USDC).balanceOf(address(this)));
+            usdcForToken1 = _getUSDCNeededForToken(token1, amount1Needed);
+        }
+        
+        // Perform swaps
+        if (token0 == USDC) {
+            // Token0 is USDC, only need to swap for token1
+            if (amount1Needed > 0) {
+                _executeOptimalSwap(USDC, token1, usdcForToken1, amount1Needed);
+            }
+        } else if (token1 == USDC) {
+            // Token1 is USDC, only need to swap for token0
+            if (amount0Needed > 0) {
+                _executeOptimalSwap(USDC, token0, usdcForToken0, amount0Needed);
+            }
+        } else {
+            // Neither token is USDC, need to swap for both
+            // Check if either token is WETH to optimize routing
+            if (token0 == WETH) {
+                // First swap USDC -> WETH for token0
+                _executeOptimalSwap(USDC, WETH, usdcForToken0, amount0Needed);
+                // Then swap USDC -> token1 (might go through WETH)
+                _executeOptimalSwap(USDC, token1, usdcForToken1, amount1Needed);
+            } else if (token1 == WETH) {
+                // First swap USDC -> token0 (might go through WETH)
+                _executeOptimalSwap(USDC, token0, usdcForToken0, amount0Needed);
+                // Then swap USDC -> WETH for token1
+                _executeOptimalSwap(USDC, WETH, usdcForToken1, amount1Needed);
+            } else {
+                // Neither token is USDC or WETH, swap for both
+                _executeOptimalSwap(USDC, token0, usdcForToken0, amount0Needed);
+                _executeOptimalSwap(USDC, token1, usdcForToken1, amount1Needed);
+            }
         }
     }
     
@@ -802,6 +863,246 @@ contract AerodromeAtomicOperations is AtomicBase {
         inv *= 2 - denominator * inv;
         
         result = prod0 * inv;
+    }
+    
+    /**
+     * @notice Quotes the amount of tokens received for a given USDC amount
+     * @dev Uses the quoter to simulate swaps and get expected outputs
+     * @param token The token to receive
+     * @param usdcAmount The amount of USDC to swap
+     * @return amountOut The expected amount of tokens received
+     */
+    function _quoteUSDCToToken(address token, uint256 usdcAmount) internal view returns (uint256 amountOut) {
+        if (token == USDC) {
+            return usdcAmount;
+        }
+        
+        // Try direct USDC -> token swap
+        address directPool = _findBestPool(USDC, token);
+        if (directPool != address(0)) {
+            // Use staticcall to maintain view function
+            bytes memory data = abi.encodeWithSelector(
+                IMixedQuoter.quoteExactInputSingle.selector,
+                IMixedQuoter.QuoteExactInputSingleParams({
+                    tokenIn: USDC,
+                    tokenOut: token,
+                    amountIn: usdcAmount,
+                    tickSpacing: ICLPool(directPool).tickSpacing(),
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            
+            (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+            if (success && result.length >= 32) {
+                (amountOut,,,) = abi.decode(result, (uint256, uint160, uint32, uint256));
+                return amountOut;
+            }
+        }
+        
+        // Try multi-hop through WETH: USDC -> WETH -> token
+        if (token != WETH) {
+            address usdcWethPool = _findBestPool(USDC, WETH);
+            address wethTokenPool = _findBestPool(WETH, token);
+            
+            if (usdcWethPool != address(0) && wethTokenPool != address(0)) {
+                bytes memory path = abi.encodePacked(
+                    USDC,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(usdcWethPool).tickSpacing()),
+                    WETH,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(wethTokenPool).tickSpacing()),
+                    token
+                );
+                
+                bytes memory data = abi.encodeWithSelector(
+                    IMixedQuoter.quoteExactInput.selector,
+                    path,
+                    usdcAmount
+                );
+                
+                (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+                if (success && result.length >= 32) {
+                    (amountOut,,,) = abi.decode(result, (uint256, uint160[], uint32[], uint256));
+                    return amountOut;
+                }
+            }
+        }
+        
+        revert("No valid swap path found");
+    }
+    
+    /**
+     * @notice Calculates USDC needed to get a specific token amount
+     * @dev Uses quoter to determine input needed for exact output
+     * @param token The token to receive
+     * @param tokenAmount The desired amount of tokens
+     * @return usdcNeeded The amount of USDC needed
+     */
+    function _getUSDCNeededForToken(address token, uint256 tokenAmount) internal view returns (uint256 usdcNeeded) {
+        if (token == USDC) {
+            return tokenAmount;
+        }
+        
+        // Try direct USDC -> token swap
+        address directPool = _findBestPool(USDC, token);
+        if (directPool != address(0)) {
+            bytes memory data = abi.encodeWithSelector(
+                IMixedQuoter.quoteExactOutputSingle.selector,
+                IMixedQuoter.QuoteExactOutputSingleParams({
+                    tokenIn: USDC,
+                    tokenOut: token,
+                    amountOut: tokenAmount,
+                    tickSpacing: ICLPool(directPool).tickSpacing(),
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            
+            (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+            if (success && result.length >= 32) {
+                (usdcNeeded,,,) = abi.decode(result, (uint256, uint160, uint32, uint256));
+                return usdcNeeded;
+            }
+        }
+        
+        // Try multi-hop through WETH: USDC -> WETH -> token
+        if (token != WETH) {
+            address usdcWethPool = _findBestPool(USDC, WETH);
+            address wethTokenPool = _findBestPool(WETH, token);
+            
+            if (usdcWethPool != address(0) && wethTokenPool != address(0)) {
+                // For exact output multi-hop, path is reversed
+                bytes memory path = abi.encodePacked(
+                    token,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(wethTokenPool).tickSpacing()),
+                    WETH,
+                    CL_FACTORY.tickSpacingToFee(ICLPool(usdcWethPool).tickSpacing()),
+                    USDC
+                );
+                
+                bytes memory data = abi.encodeWithSelector(
+                    IMixedQuoter.quoteExactOutput.selector,
+                    path,
+                    tokenAmount
+                );
+                
+                (bool success, bytes memory result) = address(QUOTER).staticcall(data);
+                if (success && result.length >= 32) {
+                    (usdcNeeded,,,) = abi.decode(result, (uint256, uint160[], uint32[], uint256));
+                    return usdcNeeded;
+                }
+            }
+        }
+        
+        // Fallback: estimate with a 20% buffer for safety
+        revert("Cannot determine USDC amount needed");
+    }
+    
+    /**
+     * @notice Executes optimal swap route from tokenIn to tokenOut
+     * @dev Automatically chooses between direct and multi-hop swaps
+     * @param tokenIn The input token
+     * @param tokenOut The output token
+     * @param amountIn The input amount
+     * @param minAmountOut The minimum output amount
+     */
+    function _executeOptimalSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) internal {
+        if (tokenIn == tokenOut || amountIn == 0) {
+            return;
+        }
+        
+        // Try direct swap first
+        address directPool = _findBestPool(tokenIn, tokenOut);
+        if (directPool != address(0)) {
+            _swapExactInput(tokenIn, tokenOut, amountIn, minAmountOut);
+            return;
+        }
+        
+        // If no direct pool, try multi-hop through WETH
+        address inWethPool = _findBestPool(tokenIn, WETH);
+        address wethOutPool = _findBestPool(WETH, tokenOut);
+        
+        if (inWethPool != address(0) && wethOutPool != address(0)) {
+            _swapExactInputMultihop(tokenIn, WETH, tokenOut, amountIn, minAmountOut);
+            return;
+        }
+        
+        revert("No valid swap path found");
+    }
+    
+    /**
+     * @notice Executes a multi-hop swap through WETH
+     * @dev Swaps tokenIn -> WETH -> tokenOut
+     * @param tokenIn The input token
+     * @param tokenIntermediate The intermediate token (WETH)
+     * @param tokenOut The output token
+     * @param amountIn The input amount
+     * @param minAmountOut The minimum output amount
+     * @return amountOut The actual output amount
+     */
+    function _swapExactInputMultihop(
+        address tokenIn,
+        address tokenIntermediate,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) internal returns (uint256 amountOut) {
+        _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
+        
+        // V3_SWAP_EXACT_IN command
+        bytes memory commands = abi.encodePacked(bytes1(0x00));
+        bytes[] memory inputs = new bytes[](1);
+        
+        // Get pool fees
+        address pool1 = _findBestPool(tokenIn, tokenIntermediate);
+        address pool2 = _findBestPool(tokenIntermediate, tokenOut);
+        uint24 fee1 = CL_FACTORY.tickSpacingToFee(ICLPool(pool1).tickSpacing());
+        uint24 fee2 = CL_FACTORY.tickSpacingToFee(ICLPool(pool2).tickSpacing());
+        
+        // Encode multi-hop path
+        inputs[0] = abi.encode(
+            address(this),  // recipient
+            amountIn,       // amountIn
+            minAmountOut,   // amountOutMinimum
+            abi.encodePacked(tokenIn, fee1, tokenIntermediate, fee2, tokenOut),  // multi-hop path
+            true            // payerIsUser
+        );
+        
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
+        amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+    }
+    
+    /**
+     * @notice Finds the best pool for a token pair
+     * @dev Checks multiple tick spacings and returns pool with best liquidity
+     * @param tokenA First token
+     * @param tokenB Second token
+     * @return pool The address of the best pool (or zero if none found)
+     */
+    function _findBestPool(address tokenA, address tokenB) internal view returns (address pool) {
+        // Common tick spacings on Aerodrome: 1, 50, 100, 200
+        int24[4] memory tickSpacings = [int24(1), int24(50), int24(100), int24(200)];
+        
+        address bestPool = address(0);
+        uint128 bestLiquidity = 0;
+        
+        for (uint256 i = 0; i < tickSpacings.length; i++) {
+            address candidatePool = CL_FACTORY.getPool(tokenA, tokenB, tickSpacings[i]);
+            if (candidatePool != address(0)) {
+                try ICLPool(candidatePool).liquidity() returns (uint128 liquidity) {
+                    if (liquidity > bestLiquidity) {
+                        bestLiquidity = liquidity;
+                        bestPool = candidatePool;
+                    }
+                } catch {}
+            }
+        }
+        
+        return bestPool;
     }
     
     /**
