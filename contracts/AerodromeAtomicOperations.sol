@@ -632,7 +632,8 @@ contract AerodromeAtomicOperations is AtomicBase {
             amountIn,       // amountIn
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee, tokenOut),  // path with fee
-            true            // payerIsUser (we already have tokens)
+            true,           // payerIsUser (we already have tokens)
+            false           // useSlipstreamPools (false = use UniV3 pools, which is what Aerodrome CL pools are)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
@@ -671,7 +672,8 @@ contract AerodromeAtomicOperations is AtomicBase {
             amountOut,      // amountOut
             maxAmountIn,    // amountInMaximum
             abi.encodePacked(tokenOut, fee, tokenIn),  // reversed path with fee
-            true            // payerIsUser
+            true,           // payerIsUser
+            false           // useSlipstreamPools (false = use UniV3 pools)
         );
         
         uint256 balanceBefore = IERC20(tokenIn).balanceOf(address(this));
@@ -926,7 +928,14 @@ contract AerodromeAtomicOperations is AtomicBase {
         }
         
         // Try multi-hop through common intermediate tokens
-        address[3] memory intermediates = [WETH, USDC, AERO];
+        // Add more common tokens for better routing
+        address[5] memory intermediates = [
+            WETH,
+            USDC, 
+            AERO,
+            0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA, // USDbC
+            0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22  // cbETH
+        ];
         
         for (uint256 i = 0; i < intermediates.length; i++) {
             address intermediate = intermediates[i];
@@ -997,7 +1006,14 @@ contract AerodromeAtomicOperations is AtomicBase {
         }
         
         // Try multi-hop through common intermediate tokens
-        address[3] memory intermediates = [WETH, USDC, AERO];
+        // Add more common tokens for better routing
+        address[5] memory intermediates = [
+            WETH,
+            USDC, 
+            AERO,
+            0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA, // USDbC
+            0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22  // cbETH
+        ];
         
         for (uint256 i = 0; i < intermediates.length; i++) {
             address intermediate = intermediates[i];
@@ -1062,7 +1078,13 @@ contract AerodromeAtomicOperations is AtomicBase {
         }
         
         // Try 2-hop through common intermediate tokens
-        address[3] memory intermediates = [WETH, USDC, AERO];
+        address[5] memory intermediates = [
+            WETH,
+            USDC, 
+            AERO,
+            0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA, // USDbC
+            0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22  // cbETH
+        ];
         
         for (uint256 i = 0; i < intermediates.length; i++) {
             address intermediate = intermediates[i];
@@ -1141,7 +1163,8 @@ contract AerodromeAtomicOperations is AtomicBase {
             amountIn,       // amountIn
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee1, tokenIntermediate, fee2, tokenOut),  // multi-hop path
-            true            // payerIsUser
+            true,           // payerIsUser
+            false           // useSlipstreamPools (false = use UniV3 pools)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
@@ -1218,7 +1241,8 @@ contract AerodromeAtomicOperations is AtomicBase {
             amountIn,       // amountIn
             minAmountOut,   // amountOutMinimum
             abi.encodePacked(tokenIn, fee1, intermediate1, fee2, intermediate2, fee3, tokenOut),  // three-hop path
-            true            // payerIsUser
+            true,           // payerIsUser
+            false           // useSlipstreamPools (false = use UniV3 pools)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
