@@ -11,6 +11,7 @@ import "@interfaces/ICLFactory.sol";
 import "@interfaces/ICLPool.sol";
 import "@interfaces/IMixedQuoter.sol";
 import "@interfaces/IERC20.sol";
+import "@interfaces/IGaugeFactory.sol";
 
 /**
  * @title AerodromeAtomicOperations
@@ -29,9 +30,11 @@ contract AerodromeAtomicOperations is AtomicBase {
     /// @notice NFT Position Manager for CL positions
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     /// @notice Quoter for calculating swap amounts
-    IMixedQuoter public constant QUOTER = IMixedQuoter(0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0);
+    IMixedQuoter public constant QUOTER = IMixedQuoter(0x0A5aA5D3a4d28014f967Bf0f29EAA3FF9807D5c6);
     /// @notice CL Factory for pool and gauge lookups
-    ICLFactory public constant CL_FACTORY = ICLFactory(0x31832f2a97Fd20664D76Cc421207669b55CE4BC0);
+    ICLFactory public constant CL_FACTORY = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
+    /// @notice Gauge Factory for finding gauges
+    address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
     
     /// @notice USDC token address on Base
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -219,7 +222,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         require(liquidity >= params.minLiquidity, "Insufficient liquidity minted");
         
         if (params.stake) {
-            address gauge = CL_FACTORY.gauge(params.pool);
+            address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(params.pool);
             require(gauge != address(0), "No gauge found for pool");
             
             POSITION_MANAGER.approve(gauge, tokenId);
@@ -267,7 +270,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         require(liquidity > 0, "Position has no liquidity");
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = CL_FACTORY.gauge(pool);
+        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
         
         if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId)) {
             IGauge(gauge).unstake(params.tokenId);
@@ -333,7 +336,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         (,, address token0, address token1, int24 tickSpacing,, ,,,,,) = POSITION_MANAGER.positions(tokenId);
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = CL_FACTORY.gauge(pool);
+        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
         require(gauge != address(0), "No gauge found");
         
         require(IGauge(gauge).stakedContains(msg.sender, tokenId), "Position not staked");
@@ -374,7 +377,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         require(liquidity > 0, "Position has no liquidity");
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = CL_FACTORY.gauge(pool);
+        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
         
         if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, tokenId)) {
             IGauge(gauge).unstake(tokenId);
@@ -514,7 +517,7 @@ contract AerodromeAtomicOperations is AtomicBase {
     
     /**
      * @notice Swaps an exact amount of input token for output token
-     * @dev Uses Universal Router V3_SWAP_EXACT_IN command
+     * @dev Uses Universal Router V3_SWAP_EXACT_IN command (0x00)
      * @param tokenIn The input token address
      * @param tokenOut The output token address
      * @param amountIn The exact input amount
@@ -529,24 +532,30 @@ contract AerodromeAtomicOperations is AtomicBase {
     ) internal returns (uint256 amountOut) {
         _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
         
+        // V3_SWAP_EXACT_IN command
         bytes memory commands = abi.encodePacked(bytes1(0x00));
         bytes[] memory inputs = new bytes[](1);
+        
+        // Get pool fee from factory
+        int24 tickSpacing = _getTickSpacingForPair(tokenIn, tokenOut);
+        uint24 fee = CL_FACTORY.tickSpacingToFee(tickSpacing);
+        
         inputs[0] = abi.encode(
-            address(this),
-            amountIn,
-            minAmountOut,
-            _encodePath(tokenIn, tokenOut),
-            true
+            address(this),  // recipient
+            amountIn,       // amountIn
+            minAmountOut,   // amountOutMinimum
+            abi.encodePacked(tokenIn, fee, tokenOut),  // path with fee
+            true            // payerIsUser (we already have tokens)
         );
         
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
-        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp);
+        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
         amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
     }
     
     /**
      * @notice Swaps input token for an exact amount of output token
-     * @dev Uses Universal Router V3_SWAP_EXACT_OUT command
+     * @dev Uses Universal Router V3_SWAP_EXACT_OUT command (0x01)
      * @param tokenIn The input token address
      * @param tokenOut The output token address
      * @param amountOut The exact output amount desired
@@ -561,23 +570,48 @@ contract AerodromeAtomicOperations is AtomicBase {
     ) internal returns (uint256 amountIn) {
         _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), maxAmountIn);
         
+        // V3_SWAP_EXACT_OUT command
         bytes memory commands = abi.encodePacked(bytes1(0x01));
         bytes[] memory inputs = new bytes[](1);
+        
+        // Get pool fee from factory
+        int24 tickSpacing = _getTickSpacingForPair(tokenIn, tokenOut);
+        uint24 fee = CL_FACTORY.tickSpacingToFee(tickSpacing);
+        
+        // For exact output, path is reversed (tokenOut -> tokenIn)
         inputs[0] = abi.encode(
-            address(this),
-            amountOut,
-            maxAmountIn,
-            _encodePath(tokenOut, tokenIn),
-            true
+            address(this),  // recipient
+            amountOut,      // amountOut
+            maxAmountIn,    // amountInMaximum
+            abi.encodePacked(tokenOut, fee, tokenIn),  // reversed path with fee
+            true            // payerIsUser
         );
         
         uint256 balanceBefore = IERC20(tokenIn).balanceOf(address(this));
-        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp);
+        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
         amountIn = balanceBefore - IERC20(tokenIn).balanceOf(address(this));
     }
     
-    function _encodePath(address tokenA, address tokenB) internal pure returns (bytes memory) {
-        return abi.encodePacked(tokenA, uint24(3000), tokenB);
+    /**
+     * @notice Gets the tick spacing for a token pair
+     * @dev Tries common tick spacings to find the pool
+     * @param tokenA First token address
+     * @param tokenB Second token address
+     * @return tickSpacing The tick spacing of the pool
+     */
+    function _getTickSpacingForPair(address tokenA, address tokenB) internal view returns (int24 tickSpacing) {
+        // Common tick spacings on Aerodrome: 1, 50, 100, 200
+        int24[4] memory commonTickSpacings = [int24(1), int24(50), int24(100), int24(200)];
+        
+        for (uint256 i = 0; i < commonTickSpacings.length; i++) {
+            address pool = CL_FACTORY.getPool(tokenA, tokenB, commonTickSpacings[i]);
+            if (pool != address(0)) {
+                return commonTickSpacings[i];
+            }
+        }
+        
+        // Default to tick spacing 100 if no pool found
+        revert("No pool found for token pair");
     }
     
     /**

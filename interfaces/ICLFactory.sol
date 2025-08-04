@@ -24,4 +24,12 @@ interface ICLFactory {
     function gauge(address pool) external view returns (address);
     
     function voter() external view returns (address);
+    
+    function tickSpacingToFee(int24 tickSpacing) external view returns (uint24 fee);
+    
+    function isPool(address pool) external view returns (bool);
+    
+    function allPools(uint256 index) external view returns (address);
+    
+    function allPoolsLength() external view returns (uint256);
 }

@@ -3,12 +3,15 @@ pragma solidity 0.8.26;
 
 import "forge-std/Test.sol";
 import "../contracts/AerodromeAtomicOperations.sol";
+import "../contracts/CDPWalletRegistry.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
 import "@interfaces/IGauge.sol";
+import "@interfaces/ICLFactory.sol";
 
 contract AerodromeAtomicOperationsTest is Test {
     AerodromeAtomicOperations public atomic;
+    CDPWalletRegistry public walletRegistry;
     
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
@@ -18,19 +21,43 @@ contract AerodromeAtomicOperationsTest is Test {
     address constant USER = address(0x1337);
     
     uint256 baseMainnetFork;
+    address testPool;
     
     function setUp() public {
         string memory rpcUrl = vm.envString("BASE_RPC_URL");
         baseMainnetFork = vm.createFork(rpcUrl);
         vm.selectFork(baseMainnetFork);
         
-        atomic = new AerodromeAtomicOperations();
+        // Deploy wallet registry and register USER as a CDP wallet
+        walletRegistry = new CDPWalletRegistry();
+        walletRegistry.registerWallet(USER);
+        
+        // Deploy atomic operations contract with wallet registry
+        atomic = new AerodromeAtomicOperations(address(walletRegistry));
+        
+        // Find a valid pool for testing
+        ICLFactory factory = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
+        address token0 = USDC < WETH ? USDC : WETH;
+        address token1 = USDC > WETH ? USDC : WETH;
+        
+        // Try to find an existing pool with common tick spacings
+        int24[4] memory tickSpacings = [int24(1), int24(50), int24(100), int24(200)];
+        for (uint i = 0; i < tickSpacings.length; i++) {
+            testPool = factory.getPool(token0, token1, tickSpacings[i]);
+            if (testPool != address(0)) {
+                break;
+            }
+        }
+        
+        require(testPool != address(0), "No USDC/WETH pool found");
         
         vm.label(address(atomic), "AerodromeAtomicOperations");
+        vm.label(address(walletRegistry), "CDPWalletRegistry");
         vm.label(USDC, "USDC");
         vm.label(AERO, "AERO");
         vm.label(WETH, "WETH");
         vm.label(USER, "User");
+        vm.label(testPool, "TestPool");
         
         deal(USDC, USER, 10000e6);
         
@@ -43,9 +70,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 1000e6,
@@ -69,9 +94,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 1000e6,
@@ -95,9 +118,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory mintParams = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 1000e6,
@@ -135,9 +156,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: 887200,
             tickUpper: -887200,
             usdcAmount: 1000e6,
@@ -156,9 +175,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 1000e6,
@@ -177,9 +194,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 0,
@@ -198,9 +213,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: 1000e6,
@@ -237,9 +250,7 @@ contract AerodromeAtomicOperationsTest is Test {
         vm.startPrank(USER);
         
         AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-            token0: USDC < WETH ? USDC : WETH,
-            token1: USDC > WETH ? USDC : WETH,
-            tickSpacing: 100,
+            pool: testPool,
             tickLower: -887200,
             tickUpper: 887200,
             usdcAmount: amount,
