@@ -10,6 +10,8 @@ A smart contract for performing atomic operations on Aerodrome Finance V3 Slipst
 - **Reward Harvesting**: Claim and optionally swap AERO rewards to USDC
 - **Gas Optimized**: Uses Permit2 for gasless approvals and multicall patterns
 - **Security Focused**: Comprehensive slippage protection and reentrancy guards
+- **Smart Routing**: Automatic routing through best pools with multi-hop support
+- **Non-Standard Pool Support**: Direct pool swap fallback for pools with unusual fee/tick spacing mappings
 
 ## Contract Architecture
 
@@ -24,6 +26,7 @@ A smart contract for performing atomic operations on Aerodrome Finance V3 Slipst
 2. **AerodromeAtomicOperations.sol**: Main contract implementing atomic operations
    - Integrates with Aerodrome's Universal Router, Position Manager, and Gauge contracts
    - Handles all swap, mint, stake, and exit operations
+   - Implements direct pool swap fallback for pools incompatible with Universal Router
 
 ### Key Functions
 
@@ -69,6 +72,12 @@ Run with coverage:
 forge coverage --fork-url $BASE_RPC_URL
 ```
 
+Test specific pool swaps:
+```bash
+# Test with specific pool address (e.g., ZORA/USDC pool)
+forge test --match-test testSpecificPoolSwapMintAndStake -vvv --fork-url $BASE_RPC_URL
+```
+
 ## Security Considerations
 
 1. **Slippage Protection**: All operations include minimum output requirements
@@ -83,15 +92,14 @@ forge coverage --fork-url $BASE_RPC_URL
 - Leverages Position Manager's multicall functionality
 - Optimized math operations using assembly
 - Efficient storage patterns
+- Direct pool swaps for non-standard pools avoid extra routing overhead
 
 ## Integration Example
 
 ```solidity
 // Open a position
 AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
-    token0: USDC < WETH ? USDC : WETH,
-    token1: USDC > WETH ? USDC : WETH,
-    tickSpacing: 100,
+    pool: 0x..., // Target pool address
     tickLower: -887200,
     tickUpper: 887200,
     usdcAmount: 1000e6,
@@ -102,6 +110,16 @@ AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperatio
 
 (uint256 tokenId, uint128 liquidity) = atomic.swapMintAndStake(params);
 ```
+
+### Supported Tick Spacings
+
+The contract supports all Aerodrome tick spacings:
+- **1** → 0.01% fee (stable pools)
+- **10** → 0.05% fee (stable pools)
+- **50** → 0.25% fee (stable pools)
+- **100** → 0.5% fee (volatile pools)
+- **200** → 1% fee (volatile pools)
+- **2000** → 10% fee (volatile pools)
 
 ## Audits
 
