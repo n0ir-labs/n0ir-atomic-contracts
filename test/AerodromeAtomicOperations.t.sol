@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.26;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../contracts/AerodromeAtomicOperations.sol";
@@ -22,7 +22,7 @@ contract AerodromeAtomicOperationsTest is Test {
     address constant USER = address(0x1337);
     
     // Test with the specific pool requested
-    address constant TEST_POOL = 0x4A021bA3ab1F0121e7DF76f345C547db86Cb3468;
+    address constant TEST_POOL = 0x3f53f1Fd5b7723DDf38D93a584D280B9b94C3111;
     
     uint256 baseMainnetFork;
     address testPool;

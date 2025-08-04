@@ -440,7 +440,7 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         if (minUsdcOut > 0) {
             _safeApprove(AERO, address(UNIVERSAL_ROUTER), aeroAmount);
-            usdcReceived = _swapExactInput(AERO, USDC, aeroAmount, minUsdcOut);
+            usdcReceived = _swapExactInput(AERO, USDC, aeroAmount, minUsdcOut, _getTickSpacingForPair(AERO, USDC));
             _safeTransfer(USDC, msg.sender, usdcReceived);
         } else {
             _safeTransfer(AERO, msg.sender, aeroAmount);
@@ -627,9 +627,9 @@ contract AerodromeAtomicOperations is AtomicBase {
                 // In range, need both tokens
                 uint256 priceRatio = ((uint256(sqrtPriceX96) - uint256(sqrtRatioAX96)) * 1e18) / 
                                      (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
-                uint256 usdcForToken1 = (totalUSDC * priceRatio) / 1e18;
-                if (usdcForToken1 > 0) {
-                    _executeOptimalSwap(USDC, token1, usdcForToken1, 0);
+                uint256 amtForToken1 = (totalUSDC * priceRatio) / 1e18;
+                if (amtForToken1 > 0) {
+                    _executeOptimalSwap(USDC, token1, amtForToken1, 0);
                 }
             }
             // If below range, keep all USDC as token0
@@ -645,9 +645,9 @@ contract AerodromeAtomicOperations is AtomicBase {
                 // In range, need both tokens
                 uint256 priceRatio = ((uint256(sqrtPriceX96) - uint256(sqrtRatioAX96)) * 1e18) / 
                                      (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
-                uint256 usdcForToken0 = totalUSDC - ((totalUSDC * priceRatio) / 1e18);
-                if (usdcForToken0 > 0) {
-                    _executeOptimalSwap(USDC, token0, usdcForToken0, 0);
+                uint256 amtForToken0 = totalUSDC - ((totalUSDC * priceRatio) / 1e18);
+                if (amtForToken0 > 0) {
+                    _executeOptimalSwap(USDC, token0, amtForToken0, 0);
                 }
             }
             // If above range, keep all USDC as token1
@@ -733,17 +733,17 @@ contract AerodromeAtomicOperations is AtomicBase {
         if (token0 == USDC) {
             totalUsdc += amount0;
         } else if (amount0 > 0) {
-            totalUsdc += _swapExactInput(token0, USDC, amount0, 0);
+            totalUsdc += _swapExactInput(token0, USDC, amount0, 0, _getTickSpacingForPair(token0, USDC));
         }
         
         if (token1 == USDC) {
             totalUsdc += amount1;
         } else if (amount1 > 0) {
-            totalUsdc += _swapExactInput(token1, USDC, amount1, 0);
+            totalUsdc += _swapExactInput(token1, USDC, amount1, 0, _getTickSpacingForPair(token1, USDC));
         }
         
         if (aeroAmount > 0) {
-            totalUsdc += _swapExactInput(AERO, USDC, aeroAmount, 0);
+            totalUsdc += _swapExactInput(AERO, USDC, aeroAmount, 0, _getTickSpacingForPair(AERO, USDC));
         }
     }
     
@@ -754,23 +754,40 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @param tokenOut The output token address
      * @param amountIn The exact input amount
      * @param minAmountOut The minimum output amount
+     * @param tickSpacing The tick spacing of the pool to use
      * @return amountOut The actual output amount received
      */
     function _swapExactInput(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        uint256 minAmountOut
+        uint256 minAmountOut,
+        int24 tickSpacing
     ) internal returns (uint256 amountOut) {
+        // Get the specific pool
+        address pool = CL_FACTORY.getPool(tokenIn, tokenOut, tickSpacing);
+        require(pool != address(0), "Pool not found");
+        
+        // Try direct pool swap first for problematic pools
+        ICLPool clPool = ICLPool(pool);
+        uint24 fee = clPool.fee();
+        
+        // Check if this is a problematic pool (fee doesn't match expected mapping)
+        uint24 expectedFee = CL_FACTORY.tickSpacingToFee(tickSpacing);
+        if (fee != expectedFee || tickSpacing == 100) {
+            console.log("Using direct pool swap for problematic pool");
+            console.log("Pool:", pool);
+            console.log("Expected fee:", expectedFee);
+            console.log("Actual fee:", fee);
+            return _directPoolSwap(tokenIn, tokenOut, amountIn, minAmountOut, pool);
+        }
+        
+        // Otherwise use Universal Router
         _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
         
         // V3_SWAP_EXACT_IN command
         bytes memory commands = abi.encodePacked(bytes1(0x00));
         bytes[] memory inputs = new bytes[](1);
-        
-        // Get pool fee from factory
-        int24 tickSpacing = _getTickSpacingForPair(tokenIn, tokenOut);
-        uint24 fee = CL_FACTORY.tickSpacingToFee(tickSpacing);
         
         inputs[0] = abi.encode(
             address(this),  // recipient
@@ -834,8 +851,8 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @return tickSpacing The tick spacing of the pool
      */
     function _getTickSpacingForPair(address tokenA, address tokenB) internal view returns (int24 tickSpacing) {
-        // Common tick spacings on Aerodrome as per routing spec: 1, 10, 60, 200
-        int24[4] memory commonTickSpacings = [int24(1), int24(10), int24(60), int24(200)];
+        // All tick spacings on Aerodrome: 1, 10, 50, 100, 200, 2000
+        int24[6] memory commonTickSpacings = [int24(1), int24(10), int24(50), int24(100), int24(200), int24(2000)];
         
         for (uint256 i = 0; i < commonTickSpacings.length; i++) {
             address pool = CL_FACTORY.getPool(tokenA, tokenB, commonTickSpacings[i]);
@@ -1250,7 +1267,9 @@ contract AerodromeAtomicOperations is AtomicBase {
         console.log("Direct pool found:", directPool);
         if (directPool != address(0)) {
             console.log("Using direct swap");
-            _swapExactInput(tokenIn, tokenOut, amountIn, minAmountOut);
+            int24 poolTickSpacing = ICLPool(directPool).tickSpacing();
+            uint256 outputAmount = _swapExactInput(tokenIn, tokenOut, amountIn, minAmountOut, poolTickSpacing);
+            console.log("Swap output:", outputAmount);
             return;
         }
         
@@ -1371,8 +1390,8 @@ contract AerodromeAtomicOperations is AtomicBase {
      * @return pool The address of the best pool (or zero if none found)
      */
     function _findBestPool(address tokenA, address tokenB) internal view returns (address pool) {
-        // Common tick spacings on Aerodrome as per routing spec: 1, 10, 60, 200
-        int24[4] memory tickSpacings = [int24(1), int24(10), int24(60), int24(200)];
+        // All tick spacings on Aerodrome: 1, 10, 50, 100, 200, 2000
+        int24[6] memory tickSpacings = [int24(1), int24(10), int24(50), int24(100), int24(200), int24(2000)];
         
         address bestPool = address(0);
         uint128 bestLiquidity = 0;
@@ -1522,6 +1541,90 @@ contract AerodromeAtomicOperations is AtomicBase {
      */
     function getUSDCNeededForTokenPublic(address token, uint256 tokenAmount) external view returns (uint256) {
         return _getUSDCNeededForToken(token, tokenAmount);
+    }
+    
+    /**
+     * @notice Direct pool swap bypassing Universal Router
+     * @dev Used when Universal Router doesn't handle specific pools correctly
+     * @param tokenIn The input token
+     * @param tokenOut The output token
+     * @param amountIn The input amount
+     * @param minAmountOut The minimum output amount
+     * @param pool The specific pool to use
+     * @return amountOut The output amount received
+     */
+    function _directPoolSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        address pool
+    ) internal returns (uint256 amountOut) {
+        ICLPool clPool = ICLPool(pool);
+        
+        // Determine if tokenIn is token0 or token1
+        bool zeroForOne = tokenIn == clPool.token0();
+        require(zeroForOne ? tokenOut == clPool.token1() : tokenOut == clPool.token0(), "Invalid token pair for pool");
+        
+        // Approve pool to spend tokenIn
+        _safeApprove(tokenIn, pool, amountIn);
+        
+        // Prepare swap callback data
+        bytes memory data = abi.encode(tokenIn, tokenOut, amountIn);
+        
+        // Calculate sqrt price limit based on swap direction
+        uint160 sqrtPriceLimitX96 = zeroForOne 
+            ? 4295128739 + 1  // MIN_SQRT_RATIO + 1
+            : 1461446703485210103287273052203988822378723970342 - 1; // MAX_SQRT_RATIO - 1
+        
+        // Execute swap directly on the pool
+        try clPool.swap(
+            address(this), // recipient
+            zeroForOne,    // direction
+            int256(amountIn), // amount specified (positive for exact input)
+            sqrtPriceLimitX96, // price limit
+            data          // callback data
+        ) returns (int256 amount0, int256 amount1) {
+            amountOut = uint256(-(zeroForOne ? amount1 : amount0));
+            require(amountOut >= minAmountOut, "Insufficient output amount");
+        } catch Error(string memory reason) {
+            console.log("Direct pool swap failed:", reason);
+            revert(reason);
+        } catch (bytes memory) {
+            revert("Direct pool swap failed");
+        }
+    }
+    
+    /**
+     * @notice Callback for CL pool swaps
+     * @dev Called by the pool during swap execution
+     */
+    function uniswapV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        // Decode callback data
+        (address tokenIn, address tokenOut, uint256 expectedAmountIn) = abi.decode(data, (address, address, uint256));
+        
+        // Verify callback is from a valid pool
+        address pool = CL_FACTORY.getPool(
+            tokenIn < tokenOut ? tokenIn : tokenOut,
+            tokenIn < tokenOut ? tokenOut : tokenIn,
+            ICLPool(msg.sender).tickSpacing()
+        );
+        require(msg.sender == pool, "Invalid callback");
+        
+        // Determine amount to pay
+        uint256 amountToPay = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
+        address tokenToPay = amount0Delta > 0 ? ICLPool(msg.sender).token0() : ICLPool(msg.sender).token1();
+        
+        // Verify token and amount
+        require(tokenToPay == tokenIn, "Invalid token to pay");
+        require(amountToPay <= expectedAmountIn, "Amount exceeds expected");
+        
+        // Transfer tokens to pool
+        _safeTransfer(tokenToPay, msg.sender, amountToPay);
     }
     
     /**

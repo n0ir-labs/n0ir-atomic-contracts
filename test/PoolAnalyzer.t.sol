@@ -54,7 +54,7 @@ contract PoolAnalyzer is Test {
         
         address[4] memory intermediates = [USDC, WETH, AERO, 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA]; // USDbC
         string[4] memory names = ["USDC", "WETH", "AERO", "USDbC"];
-        int24[4] memory tickSpacings = [int24(1), int24(10), int24(60), int24(200)];
+        int24[6] memory tickSpacings = [int24(1), int24(10), int24(50), int24(100), int24(200), int24(2000)];
         
         for (uint i = 0; i < intermediates.length; i++) {
             for (uint j = 0; j < tickSpacings.length; j++) {
