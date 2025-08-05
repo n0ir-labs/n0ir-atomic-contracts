@@ -709,22 +709,22 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         
         // Check position relative to current price
         if (currentTick < tickLower) {
-            // Price below range: 100% in token0 (need to buy token0)
+            // Price below range: need 100% token0
             if (token0 == USDC) {
-                usdc0 = 0;  // Don't need to swap USDC to USDC
-                usdc1 = totalUSDC;  // All USDC goes to buying token1
+                usdc0 = totalUSDC;  // Keep all USDC as token0
+                usdc1 = 0;  // Don't need token1
             } else {
-                usdc0 = totalUSDC;  // All USDC goes to buying token0
+                usdc0 = totalUSDC;  // Swap all USDC to get token0
                 usdc1 = 0;
             }
         } else if (currentTick >= tickUpper) {
-            // Price above range: 100% in token1 (need to buy token1)
+            // Price above range: need 100% token1
             if (token1 == USDC) {
-                usdc0 = totalUSDC;  // All USDC goes to buying token0
-                usdc1 = 0;  // Don't need to swap USDC to USDC
+                usdc0 = 0;  // Don't need token0
+                usdc1 = totalUSDC;  // Keep all USDC as token1
             } else {
                 usdc0 = 0;
-                usdc1 = totalUSDC;  // All USDC goes to buying token1
+                usdc1 = totalUSDC;  // Swap all USDC to get token1
             }
         } else {
             // Price in range: Calculate optimal ratio
