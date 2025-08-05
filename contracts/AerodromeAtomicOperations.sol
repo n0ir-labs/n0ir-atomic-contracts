@@ -325,7 +325,8 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
                 amount0Min: amount0Min,
                 amount1Min: amount1Min,
                 recipient: params.stake ? address(this) : msg.sender,
-                deadline: params.deadline
+                deadline: params.deadline,
+                sqrtPriceX96: 0 // Let the pool use its current price
             })
         );
         
@@ -406,7 +407,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
         // Get current pool price
-        (uint160 sqrtPriceX96,,,,,,) = ICLPool(pool).slot0();
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
         
         uint256 amount0Min;
         uint256 amount1Min;
@@ -425,9 +426,9 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             amount1Min = (expectedAmount1 * (10000 - effectiveSlippage * 2)) / 10000;
         }
         
-        // Burn position
-        (uint256 amount0, uint256 amount1) = POSITION_MANAGER.burn(
-            INonfungiblePositionManager.BurnParams({
+        // Decrease liquidity
+        (uint256 amount0, uint256 amount1) = POSITION_MANAGER.decreaseLiquidity(
+            INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: params.tokenId,
                 liquidity: liquidity,
                 amount0Min: amount0Min,
@@ -510,7 +511,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         
-        IGauge(gauge).collectReward(tokenId);
+        IGauge(gauge).getReward(tokenId);
         
         aeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         
@@ -583,7 +584,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
         // Get current pool price
-        (uint160 sqrtPriceX96,,,,,,) = ICLPool(pool).slot0();
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
         
         uint256 amount0Min;
         uint256 amount1Min;
@@ -602,9 +603,9 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             amount1Min = (expectedAmount1 * (10000 - effectiveSlippage * 2)) / 10000;
         }
         
-        // Burn position
-        POSITION_MANAGER.burn(
-            INonfungiblePositionManager.BurnParams({
+        // Decrease liquidity
+        POSITION_MANAGER.decreaseLiquidity(
+            INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: tokenId,
                 liquidity: liquidity,
                 amount0Min: amount0Min,
@@ -655,7 +656,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         ICLPool pool
     ) internal view returns (uint256 usdc0, uint256 usdc1) {
         // Get current pool state
-        (uint160 sqrtPriceX96,,,,,,) = pool.slot0();
+        (uint160 sqrtPriceX96,,,,,) = pool.slot0();
         
         // Calculate sqrt prices at tick boundaries
         uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
@@ -733,7 +734,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      */
     function _getPoolPrice(address pool, address tokenIn, address tokenOut) internal view returns (uint256) {
         ICLPool clPool = ICLPool(pool);
-        (uint160 sqrtPriceX96,,,,,,) = clPool.slot0();
+        (uint160 sqrtPriceX96,,,,,) = clPool.slot0();
         
         uint256 price = uint256(sqrtPriceX96) * uint256(sqrtPriceX96) >> 192;
         
@@ -802,7 +803,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         } catch {}
         
         // Fallback to gauge factory
-        try IGaugeFactory(GAUGE_FACTORY).getGauge(pool) returns (address g) {
+        try IGaugeFactory(GAUGE_FACTORY).getPoolGauge(pool) returns (address g) {
             return g;
         } catch {}
         
@@ -1001,7 +1002,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         (,,,,,int24 tickLower, int24 tickUpper, uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
         
         // Get current pool state
-        (uint160 sqrtPriceX96,,,,,,) = ICLPool(pool).slot0();
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
         
         // Calculate sqrt prices at tick boundaries
         uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
@@ -1083,7 +1084,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param tokenAmount The desired amount of the token
      * @return usdcNeeded The amount of USDC needed
      */
-    function _getUSDCNeededForToken(address token, uint256 tokenAmount) internal view returns (uint256 usdcNeeded) {
+    function _getUSDCNeededForToken(address token, uint256 tokenAmount) internal returns (uint256 usdcNeeded) {
         if (token == USDC) {
             return tokenAmount;
         }
@@ -1217,7 +1218,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param tokenAmount The desired amount
      * @return The USDC needed
      */
-    function getUSDCNeededForTokenPublic(address token, uint256 tokenAmount) external view returns (uint256) {
+    function getUSDCNeededForTokenPublic(address token, uint256 tokenAmount) external returns (uint256) {
         return _getUSDCNeededForToken(token, tokenAmount);
     }
 }

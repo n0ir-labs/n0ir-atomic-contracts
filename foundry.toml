@@ -9,6 +9,14 @@ optimizer = true
 optimizer_runs = 200
 via_ir = true
 
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "@interfaces/=interfaces/",
+    "@contracts/=contracts/",
+    "@libraries/=libraries/"
+]
+
 [etherscan]
 base = { key = "${ETHERSCAN_API_KEY}" }
 
