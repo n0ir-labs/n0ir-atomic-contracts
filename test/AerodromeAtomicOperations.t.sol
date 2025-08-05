@@ -103,7 +103,17 @@ contract AerodromeAtomicOperationsTest is Test {
             deadline: block.timestamp + 3600,
             usdcAmount: 100e6, // 100 USDC
             slippageBps: 100, // 1% slippage
-            stake: false // Don't stake for this test
+            stake: false, // Don't stake for this test
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
         });
         
         uint256 usdcBefore = IERC20(USDC).balanceOf(user);
@@ -144,7 +154,17 @@ contract AerodromeAtomicOperationsTest is Test {
             deadline: block.timestamp + 3600,
             usdcAmount: 100e6,
             slippageBps: 100,
-            stake: false
+            stake: false,
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
         });
         
         (uint256 tokenId,) = atomicOps.swapMintAndStake(mintParams);
@@ -158,7 +178,17 @@ contract AerodromeAtomicOperationsTest is Test {
             pool: WETH_USDC_POOL,
             deadline: block.timestamp + 3600,
             minUsdcOut: 90e6, // Accept 10% slippage for test
-            slippageBps: 200 // 2% slippage
+            slippageBps: 200, // 2% slippage
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
         });
         
         uint256 usdcBefore = IERC20(USDC).balanceOf(user);
