@@ -9,6 +9,7 @@ import "@interfaces/INonfungiblePositionManager.sol";
 import "@interfaces/IGauge.sol";
 import "@interfaces/ICLPool.sol";
 import "@interfaces/IMixedQuoter.sol";
+import "@interfaces/ISugarHelper.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/IGaugeFactory.sol";
 import "@interfaces/ILpSugar.sol";
@@ -33,6 +34,8 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     /// @notice Quoter for calculating swap amounts
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x0A5aA5D3a4d28014f967Bf0f29EAA3FF9807D5c6);
+    /// @notice SugarHelper for liquidity calculations
+    ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     /// @notice Gauge Factory for finding gauges
     address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
     /// @notice Voter contract for gauge lookups
@@ -239,6 +242,19 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
+     * @notice Tries to stake a position, can be called externally for try/catch
+     * @param tokenId The position token ID
+     * @param pool The pool address
+     */
+    function _tryStakePosition(uint256 tokenId, address pool) external {
+        require(msg.sender == address(this), "Internal only");
+        address gauge = _findGaugeForPool(pool);
+        require(gauge != address(0), "No gauge found");
+        POSITION_MANAGER.approve(gauge, tokenId);
+        IGauge(gauge).deposit(tokenId);
+    }
+    
+    /**
      * @notice Approves token to Permit2 if needed
      * @param token The token to approve
      * @param amount The amount to ensure is approved
@@ -316,19 +332,21 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint256 amount1 = 0;
         
         if (token0 == USDC) {
-            amount0 = usdc0;
+            // token0 is USDC, we keep usdc0 amount and swap usdc1 for token1
+            amount0 = usdc0;  // Keep as USDC
             if (usdc1 > 0) {
                 // Approve via Permit2 instead of direct approval
                 _approveUniversalRouterViaPermit2(USDC, usdc1);
-                // Use the provided pool for swapping
+                // Swap USDC for token1
                 amount1 = _swapExactInputDirect(USDC, token1, usdc1, 0, params.pool);
             }
         } else if (token1 == USDC) {
-            amount1 = usdc1;
+            // token1 is USDC, we swap usdc0 for token0 and keep usdc1 amount
+            amount1 = usdc1;  // Keep as USDC
             if (usdc0 > 0) {
                 // Approve via Permit2 instead of direct approval
                 _approveUniversalRouterViaPermit2(USDC, usdc0);
-                // Use the provided pool for swapping
+                // Swap USDC for token0
                 amount0 = _swapExactInputDirect(USDC, token0, usdc0, 0, params.pool);
             }
         } else {
@@ -343,6 +361,10 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         // Calculate minimum amounts with slippage
         uint256 amount0Min = (amount0 * (10000 - effectiveSlippage)) / 10000;
         uint256 amount1Min = (amount1 * (10000 - effectiveSlippage)) / 10000;
+        
+        // Debug: Check amounts and tokens before minting
+        require(amount0 > 0 || amount1 > 0, "Must have at least one token");
+        require(token0 < token1, "Tokens must be sorted");
         
         // Mint position
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(
@@ -366,6 +388,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         if (params.stake) {
             address gauge = _findGaugeForPool(params.pool);
             if (gauge != address(0)) {
+                // Try to stake the position
                 POSITION_MANAGER.approve(gauge, tokenId);
                 IGauge(gauge).deposit(tokenId);
             } else {
@@ -437,20 +460,18 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         
         // Get position tick boundaries
         (,,,,,int24 tickLower, int24 tickUpper,,,,,) = POSITION_MANAGER.positions(params.tokenId);
-        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
-        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
-        // Get current pool price
-        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+        // Get current pool tick
+        (,int24 currentTick,,,,) = ICLPool(pool).slot0();
         
         uint256 amount0Min;
         uint256 amount1Min;
         
-        if (sqrtPriceX96 <= sqrtRatioAX96) {
+        if (currentTick < tickLower) {
             // All in token0
             amount0Min = (expectedAmount0 * (10000 - effectiveSlippage)) / 10000;
             amount1Min = 0;
-        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
+        } else if (currentTick >= tickUpper) {
             // All in token1
             amount0Min = 0;
             amount1Min = (expectedAmount1 * (10000 - effectiveSlippage)) / 10000;
@@ -610,20 +631,18 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         
         // Get position tick boundaries
         (,,,,,int24 tickLower, int24 tickUpper,,,,,) = POSITION_MANAGER.positions(tokenId);
-        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
-        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
         
-        // Get current pool price
-        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+        // Get current pool tick
+        (,int24 currentTick,,,,) = ICLPool(pool).slot0();
         
         uint256 amount0Min;
         uint256 amount1Min;
         
-        if (sqrtPriceX96 <= sqrtRatioAX96) {
+        if (currentTick < tickLower) {
             // All in token0
             amount0Min = (expectedAmount0 * (10000 - effectiveSlippage)) / 10000;
             amount1Min = 0;
-        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
+        } else if (currentTick >= tickUpper) {
             // All in token1  
             amount0Min = 0;
             amount1Min = (expectedAmount1 * (10000 - effectiveSlippage)) / 10000;
@@ -686,33 +705,61 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         ICLPool pool
     ) internal view returns (uint256 usdc0, uint256 usdc1) {
         // Get current pool state
-        (uint160 sqrtPriceX96,,,,,) = pool.slot0();
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = pool.slot0();
         
-        // Calculate sqrt prices at tick boundaries
-        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
-        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
-        
-        // Determine allocation based on current price relative to range
-        if (sqrtPriceX96 <= sqrtRatioAX96) {
-            // Current price is below range - all in token0
-            usdc0 = totalUSDC;
-            usdc1 = 0;
-        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
-            // Current price is above range - all in token1
-            usdc0 = 0;
-            usdc1 = totalUSDC;
-        } else {
-            // Current price is within range - use simplified calculation
-            // For WETH/USDC pool, calculate based on current price ratio
-            
-            if (token0 == USDC || token1 == USDC) {
-                // One token is USDC - simple case
-                // Just split 50/50 for now to avoid complex calculations
-                usdc0 = totalUSDC / 2;
-                usdc1 = totalUSDC - usdc0;
+        // Check position relative to current price
+        if (currentTick < tickLower) {
+            // Price below range: 100% in token0 (need to buy token0)
+            if (token0 == USDC) {
+                usdc0 = 0;  // Don't need to swap USDC to USDC
+                usdc1 = totalUSDC;  // All USDC goes to buying token1
             } else {
-                // Neither token is USDC - shouldn't happen for WETH/USDC pool
-                // Default to 50/50 split
+                usdc0 = totalUSDC;  // All USDC goes to buying token0
+                usdc1 = 0;
+            }
+        } else if (currentTick >= tickUpper) {
+            // Price above range: 100% in token1 (need to buy token1)
+            if (token1 == USDC) {
+                usdc0 = totalUSDC;  // All USDC goes to buying token0
+                usdc1 = 0;  // Don't need to swap USDC to USDC
+            } else {
+                usdc0 = 0;
+                usdc1 = totalUSDC;  // All USDC goes to buying token1
+            }
+        } else {
+            // Price in range: Calculate optimal ratio
+            // Use a simplified approach based on position in range
+            
+            // Calculate how far we are through the range (0 to 100)
+            int24 rangeSize = tickUpper - tickLower;
+            int24 positionInRange = currentTick - tickLower;
+            
+            if (rangeSize > 0) {
+                // Calculate percentage through range (scaled by 100 for precision)
+                uint256 percentThrough = uint256(int256(positionInRange * 100 / rangeSize));
+                
+                // As we move up through range, we need more token1 and less token0
+                // At bottom of range: mostly token0
+                // At top of range: mostly token1
+                uint256 token1Percent = percentThrough;
+                uint256 token0Percent = 100 - percentThrough;
+                
+                // Apply percentages based on which token is USDC
+                if (token0 == USDC) {
+                    // token0 is USDC, we keep some as USDC and swap some for token1
+                    usdc0 = (totalUSDC * token0Percent) / 100;  // Keep as USDC for token0
+                    usdc1 = totalUSDC - usdc0;  // Swap to token1
+                } else if (token1 == USDC) {
+                    // token1 is USDC, we swap some for token0 and keep some as USDC
+                    usdc0 = (totalUSDC * token0Percent) / 100;  // Swap to token0
+                    usdc1 = totalUSDC - usdc0;  // Keep as USDC for token1
+                } else {
+                    // Neither is USDC (shouldn't happen)
+                    usdc0 = totalUSDC / 2;
+                    usdc1 = totalUSDC - usdc0;
+                }
+            } else {
+                // Edge case: zero-width range
                 usdc0 = totalUSDC / 2;
                 usdc1 = totalUSDC - usdc0;
             }
@@ -729,22 +776,9 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             return 1e18; // 1 USDC = 1 USDC
         }
         
-        // Find best pool for pricing
-        address pool = _findBestPool(token, USDC);
-        if (pool == address(0)) {
-            // Try through WETH if direct pool doesn't exist
-            address tokenWethPool = _findBestPool(token, WETH);
-            address wethUsdcPool = _findBestPool(WETH, USDC);
-            
-            if (tokenWethPool != address(0) && wethUsdcPool != address(0)) {
-                uint256 tokenPriceInWeth = _getPoolPrice(tokenWethPool, token, WETH);
-                uint256 wethPriceInUsdc = _getPoolPrice(wethUsdcPool, WETH, USDC);
-                return (tokenPriceInWeth * wethPriceInUsdc) / 1e18;
-            }
-            return 1e18; // Default to 1:1 if no pricing available
-        }
-        
-        return _getPoolPrice(pool, token, USDC);
+        // For now, return a default price
+        // In production, this would use an oracle or be passed as parameter
+        return 1e18; // Default to 1:1
     }
     
     /**
@@ -838,7 +872,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param tokenOut The output token
      * @param amountIn The exact input amount
      * @param minAmountOut The minimum output amount
-     * @param tickSpacing The tick spacing for the pool
+     * @param pool The pool address to use for swapping
      * @return amountOut The output amount received
      */
     function _swapExactInput(
@@ -846,12 +880,9 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         address tokenOut,
         uint256 amountIn,
         uint256 minAmountOut,
-        int24 tickSpacing
+        address pool
     ) internal returns (uint256 amountOut) {
-        // Find the pool for this pair
-        address pool = _findPoolWithTickSpacing(tokenIn, tokenOut, tickSpacing);
-        require(pool != address(0), "Pool not found");
-        
+        require(pool != address(0), "Invalid pool");
         return _swapExactInputDirect(tokenIn, tokenOut, amountIn, minAmountOut, pool);
     }
     
@@ -949,75 +980,6 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         require(amountIn <= maxAmountIn, "Excessive input amount");
     }
     
-    /**
-     * @notice Finds a pool with specific tick spacing
-     * @param tokenA First token address
-     * @param tokenB Second token address
-     * @param tickSpacing The desired tick spacing
-     * @return pool The pool address (or address(0) if not found)
-     */
-    function _findPoolWithTickSpacing(address tokenA, address tokenB, int24 tickSpacing) internal view returns (address) {
-        // We need to check if a pool exists by trying to interact with it
-        // This is a simplified approach - in production, you'd want to use a registry or factory
-        address potentialPool = _derivePoolAddress(tokenA, tokenB, tickSpacing);
-        
-        // Verify it's a valid pool by checking if it has the expected interface
-        if (potentialPool.code.length > 0) {
-            try ICLPool(potentialPool).token0() returns (address) {
-                return potentialPool;
-            } catch {}
-        }
-        
-        return address(0);
-    }
-    
-    /**
-     * @notice Derives pool address from tokens and tick spacing
-     * @dev This is a placeholder - actual implementation would use CREATE2 prediction or registry lookup
-     * @param token0 First token (sorted)
-     * @param token1 Second token (sorted)
-     * @param tickSpacing The tick spacing
-     * @return The likely pool address
-     */
-    function _derivePoolAddress(address token0, address token1, int24 tickSpacing) internal pure returns (address) {
-        // In production, this would calculate the CREATE2 address or look up in a registry
-        // For now, we return a deterministic address based on inputs
-        return address(uint160(uint256(keccak256(abi.encodePacked(token0, token1, tickSpacing)))));
-    }
-    
-    /**
-     * @notice Calculates sqrt(1.0001^tick) * 2^96
-     * @dev See Uniswap V3 whitepaper for math details
-     */
-    function _getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
-        uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
-        require(absTick <= uint256(887272), "T");
-        
-        uint256 ratio = absTick & 0x1 != 0 ? 0xfffcb933bd6fad37aa2d162d1a594001 : 0x100000000000000000000000000000000;
-        if (absTick & 0x2 != 0) ratio = (ratio * 0xfff97272373d413259a46990580e213a) >> 128;
-        if (absTick & 0x4 != 0) ratio = (ratio * 0xfff2e50f5f656932ef12357cf3c7fdcc) >> 128;
-        if (absTick & 0x8 != 0) ratio = (ratio * 0xffe5caca7e10e4e61c3624eaa0941cd0) >> 128;
-        if (absTick & 0x10 != 0) ratio = (ratio * 0xffcb9843d60f6159c9db58835c926644) >> 128;
-        if (absTick & 0x20 != 0) ratio = (ratio * 0xff973b41fa98c081472e6896dfb254c0) >> 128;
-        if (absTick & 0x40 != 0) ratio = (ratio * 0xff2ea16466c96a3843ec78b326b52861) >> 128;
-        if (absTick & 0x80 != 0) ratio = (ratio * 0xfe5dee046a99a2a811c461f1969c3053) >> 128;
-        if (absTick & 0x100 != 0) ratio = (ratio * 0xfcbe86c7900a88aedcffc83b479aa3a4) >> 128;
-        if (absTick & 0x200 != 0) ratio = (ratio * 0xf987a7253ac413176f2b074cf7815e54) >> 128;
-        if (absTick & 0x400 != 0) ratio = (ratio * 0xf3392b0822b70005940c7a398e4b70f3) >> 128;
-        if (absTick & 0x800 != 0) ratio = (ratio * 0xe7159475a2c29b7443b29c7fa6e889d9) >> 128;
-        if (absTick & 0x1000 != 0) ratio = (ratio * 0xd097f3bdfd2022b8845ad8f792aa5825) >> 128;
-        if (absTick & 0x2000 != 0) ratio = (ratio * 0xa9f746462d870fdf8a65dc1f90e061e5) >> 128;
-        if (absTick & 0x4000 != 0) ratio = (ratio * 0x70d869a156d2a1b890bb3df62baf32f7) >> 128;
-        if (absTick & 0x8000 != 0) ratio = (ratio * 0x31be135f97d08fd981231505542fcfa6) >> 128;
-        if (absTick & 0x10000 != 0) ratio = (ratio * 0x9aa508b5b7a84e1c677de54f3e99bc9) >> 128;
-        if (absTick & 0x20000 != 0) ratio = (ratio * 0x5d6af8dedb81196699c329225ee604) >> 128;
-        if (absTick & 0x40000 != 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98) >> 128;
-        if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
-        
-        if (tick > 0) ratio = type(uint256).max / ratio;
-        
-        sqrtPriceX96 = uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
-    }
     
     /**
      * @notice Calculates expected amounts from burning a position
@@ -1033,36 +995,26 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         (,,,,,int24 tickLower, int24 tickUpper, uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
         
         // Get current pool state
-        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+        (,int24 currentTick,,,,) = ICLPool(pool).slot0();
         
-        // Calculate sqrt prices at tick boundaries
-        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
-        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        // Simplified approach based on tick position
+        // The actual amounts will be calculated by the NonfungiblePositionManager
+        // This is just an estimate for slippage purposes
+        uint256 liq = uint256(liquidity);
         
-        if (sqrtPriceX96 <= sqrtRatioAX96) {
-            // Current price is below range - all in token0
-            // Simplified calculation to avoid overflow
-            uint256 liq = uint256(liquidity);
-            
-            // Safe approximation: amount0 = liquidity * deltaPrice / avgPrice
-            // Using simplified calculation to avoid overflow
-            amount0 = (liq * 2) / 1000; // Rough approximation
+        if (currentTick < tickLower) {
+            // Price below range - mostly token0
+            amount0 = liq;  // Simplified: use liquidity as proxy for amount
             amount1 = 0;
-        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
-            // Current price is above range - all in token1
+        } else if (currentTick >= tickUpper) {
+            // Price above range - mostly token1
             amount0 = 0;
-            
-            // Safe approximation for amount1
-            uint256 liq = uint256(liquidity);
-            amount1 = (liq * 2) / 1000; // Rough approximation
+            amount1 = liq;  // Simplified: use liquidity as proxy for amount
         } else {
-            // Current price is within range
-            uint256 liq = uint256(liquidity);
-            
-            // Simplified calculation to avoid overflow
-            // Just use rough approximations based on liquidity
-            amount0 = liq / 2000; // Rough approximation for token0
-            amount1 = liq / 2000; // Rough approximation for token1
+            // Price in range - both tokens
+            // Simple 50/50 split for estimation
+            amount0 = liq / 2;
+            amount1 = liq / 2;
         }
     }
     
@@ -1095,33 +1047,6 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
-     * @notice Finds the best pool for a token pair
-     * @dev Checks multiple tick spacings and returns pool with highest liquidity
-     * @param tokenA First token address
-     * @param tokenB Second token address
-     * @return bestPool The best pool address (or address(0) if none found)
-     */
-    function _findBestPool(address tokenA, address tokenB) internal view returns (address bestPool) {
-        // Common tick spacings on Aerodrome
-        int24[6] memory tickSpacings = [int24(1), int24(10), int24(50), int24(100), int24(200), int24(2000)];
-        uint128 highestLiquidity = 0;
-        
-        for (uint256 i = 0; i < tickSpacings.length; i++) {
-            address candidatePool = _findPoolWithTickSpacing(tokenA, tokenB, tickSpacings[i]);
-            if (candidatePool != address(0)) {
-                try ICLPool(candidatePool).liquidity() returns (uint128 liquidity) {
-                    if (liquidity > highestLiquidity) {
-                        highestLiquidity = liquidity;
-                        bestPool = candidatePool;
-                    }
-                } catch {}
-            }
-        }
-        
-        return bestPool;
-    }
-    
-    /**
      * @notice Gets USDC needed to acquire a specific amount of a token
      * @param token The target token
      * @param tokenAmount The desired amount of the token
@@ -1132,29 +1057,12 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             return tokenAmount;
         }
         
-        // Find best pool for pricing
-        address pool = _findBestPool(USDC, token);
-        require(pool != address(0), "No USDC pool for token");
-        
-        // Quote the swap
-        try QUOTER.quoteExactOutputSingle(
-            IMixedQuoter.QuoteExactOutputSingleParams({
-                tokenIn: USDC,
-                tokenOut: token,
-                amountOut: tokenAmount,
-                tickSpacing: ICLPool(pool).tickSpacing(),
-                sqrtPriceLimitX96: 0
-            })
-        ) returns (uint256 amountIn, uint160, uint32, uint256) {
-            // Add 1% buffer for slippage
-            usdcNeeded = (amountIn * 101) / 100;
-        } catch {
-            // Fallback calculation using price
-            uint256 tokenPrice = _getTokenPriceInUSDC(token);
-            usdcNeeded = (tokenAmount * tokenPrice) / 1e18;
-            // Add buffer
-            usdcNeeded = (usdcNeeded * 101) / 100;
-        }
+        // For now, just return a simple estimate
+        // In production, pool address would be passed as parameter
+        uint256 tokenPrice = _getTokenPriceInUSDC(token);
+        usdcNeeded = (tokenAmount * tokenPrice) / 1e18;
+        // Add buffer
+        usdcNeeded = (usdcNeeded * 101) / 100;
     }
     
     /**
