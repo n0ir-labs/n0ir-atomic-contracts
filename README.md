@@ -1,66 +1,68 @@
-## Foundry
+# Aerodrome Atomic Operations
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Smart contracts for atomic operations on Aerodrome Finance concentrated liquidity pools.
 
-Foundry consists of:
+## Overview
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+This repository contains optimized smart contracts for performing atomic operations on Aerodrome CL pools, including:
+- Swapping USDC for pool tokens and minting concentrated liquidity positions
+- Staking positions in gauges for AERO rewards
+- Exiting positions and converting back to USDC
+- Oracle-based price discovery for accurate position calculations
 
-## Documentation
+## Key Features
 
-https://book.getfoundry.sh/
+### 🔮 Oracle Integration
+- Uses 1inch Offchain Oracle (0x288a124CB87D7c95656Ad7512B7Da733Bb60A432) for accurate USD price discovery
+- Calculates optimal token ratios based on real market prices
+- Works with any token pair, not limited to USDC pairs
 
-## Usage
+### ⚡ Atomic Operations
+- Single-transaction position entry (swap + mint + stake)
+- Single-transaction position exit (unstake + burn + swap)
+- Minimizes MEV exposure and gas costs
 
-### Build
+### 📊 Optimized Liquidity Calculations
+- Uses Aerodrome's SugarHelper for precise liquidity math
+- Calculates optimal token amounts for in-range positions
+- Handles out-of-range positions correctly
 
-```shell
-$ forge build
+## Contracts
+
+### AerodromeAtomicOperations.sol
+Main contract providing atomic operations for Aerodrome CL positions.
+
+**Key Functions:**
+- `swapMintAndStake`: Swap USDC to tokens, mint position, and optionally stake
+- `fullExit`: Exit position completely and convert to USDC
+- `calculateOptimalUSDCAllocation`: Calculate optimal token amounts using oracle prices
+
+### AtomicBase.sol
+Base contract with common functionality for atomic operations.
+
+### CDPWalletRegistry.sol
+Optional registry for CDP wallet access control.
+
+## Testing
+
+Run tests with Forge:
+```bash
+forge test --fork-url https://base.llamarpc.com -vv
 ```
 
-### Test
+## Gas Costs
 
-```shell
-$ forge test
-```
+Typical gas usage on Base network:
+- Swap + Mint + Stake: ~1.3M gas ($0.05-0.25 at typical Base prices)
+- Full Exit: ~1.6M gas ($0.06-0.30 at typical Base prices)
 
-### Format
+## Dependencies
 
-```shell
-$ forge fmt
-```
+- Aerodrome Finance contracts
+- 1inch Offchain Oracle
+- OpenZeppelin contracts
+- Forge/Foundry for development
 
-### Gas Snapshots
+## License
 
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+MIT

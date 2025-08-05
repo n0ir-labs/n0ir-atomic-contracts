@@ -2,14 +2,14 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../contracts/AerodromeAtomicOperationsV2.sol";
+import "../contracts/AerodromeAtomicOperations.sol";
 import "../contracts/CDPWalletRegistry.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/ICLPool.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
 
-contract AerodromeAtomicOperationsV2Test is Test {
-    AerodromeAtomicOperationsV2 public atomicOps;
+contract AerodromeAtomicOperationsTest is Test {
+    AerodromeAtomicOperations public atomicOps;
     CDPWalletRegistry public registry;
     
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -27,7 +27,7 @@ contract AerodromeAtomicOperationsV2Test is Test {
         
         // Deploy contracts
         registry = new CDPWalletRegistry();
-        atomicOps = new AerodromeAtomicOperationsV2(address(registry));
+        atomicOps = new AerodromeAtomicOperations(address(registry));
         
         // Setup user with USDC
         deal(USDC, user, 1000e6); // 1000 USDC
@@ -96,7 +96,7 @@ contract AerodromeAtomicOperationsV2Test is Test {
         int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
-        AerodromeAtomicOperationsV2.SwapMintParams memory params = AerodromeAtomicOperationsV2.SwapMintParams({
+        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -137,7 +137,7 @@ contract AerodromeAtomicOperationsV2Test is Test {
         int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
-        AerodromeAtomicOperationsV2.SwapMintParams memory mintParams = AerodromeAtomicOperationsV2.SwapMintParams({
+        AerodromeAtomicOperations.SwapMintParams memory mintParams = AerodromeAtomicOperations.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -153,8 +153,9 @@ contract AerodromeAtomicOperationsV2Test is Test {
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(atomicOps), tokenId);
         
         // Now exit the position
-        AerodromeAtomicOperationsV2.FullExitParams memory exitParams = AerodromeAtomicOperationsV2.FullExitParams({
+        AerodromeAtomicOperations.FullExitParams memory exitParams = AerodromeAtomicOperations.FullExitParams({
             tokenId: tokenId,
+            pool: WETH_USDC_POOL,
             deadline: block.timestamp + 3600,
             minUsdcOut: 90e6, // Accept 10% slippage for test
             slippageBps: 200 // 2% slippage
