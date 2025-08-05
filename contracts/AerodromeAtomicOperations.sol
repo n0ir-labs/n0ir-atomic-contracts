@@ -125,6 +125,28 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
+     * @notice Modifier to validate swap routes
+     * @param routes The swap routes to validate
+     */
+    modifier validateRoutes(SwapRoute[] memory routes) {
+        // Allow empty routes for direct USDC positions
+        if (routes.length > 0) {
+            require(routes.length <= 2, "Too many routes");
+            
+            for (uint256 i = 0; i < routes.length; i++) {
+                require(routes[i].pools.length > 0 && routes[i].pools.length <= 3, "Invalid hop count");
+                require(routes[i].tokenOut != address(0), "Invalid tokenOut");
+                
+                // Validate all pools in the route
+                for (uint256 j = 0; j < routes[i].pools.length; j++) {
+                    require(_isValidPool(routes[i].pools[j]), "Invalid pool in route");
+                }
+            }
+        }
+        _;
+    }
+    
+    /**
      * @notice Constructor sets the CDP wallet registry
      * @param _walletRegistry The address of the CDP wallet registry contract
      */
@@ -148,6 +170,18 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
+     * @notice Swap route configuration
+     * @param pools Ordered pool addresses for the swap path
+     * @param tokenOut Final output token (must be token0 or token1 of target pool)
+     * @param amountIn USDC amount for this route (0 = calculate optimally)
+     */
+    struct SwapRoute {
+        address[] pools;
+        address tokenOut;
+        uint256 amountIn;
+    }
+    
+    /**
      * @notice Parameters for swap and mint operations
      * @param pool The address of the Aerodrome CL pool
      * @param tickLower The lower tick boundary for the position
@@ -157,6 +191,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param deadline The deadline timestamp for the transaction
      * @param stake Whether to stake the position in the gauge after minting
      * @param slippageBps Custom slippage tolerance in basis points (0 = use default)
+     * @param routes Array of swap routes (if empty, keeps USDC as is)
      */
     struct SwapMintParams {
         address pool;
@@ -167,6 +202,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint256 deadline;
         bool stake;
         uint256 slippageBps;
+        SwapRoute[] routes;
     }
     
     /**
@@ -209,6 +245,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      */
     function _swapMintAndStakeInternal(SwapMintParams memory params) 
         internal 
+        validateRoutes(params.routes)
         returns (uint256 tokenId, uint128 liquidity)
     {
         _safeTransferFrom(USDC, msg.sender, address(this), params.usdcAmount);
@@ -225,19 +262,58 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         // Get effective slippage for this operation
         uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
         
-        // Calculate how to split USDC optimally and perform swaps
-        _performOptimalSwapsForLiquidity(
+        // Calculate optimal amounts if not specified and execute swaps
+        uint256[] memory swapAmounts = _calculateSwapAmounts(
+            params.routes,
+            params.usdcAmount,
             token0,
             token1,
-            params.usdcAmount,
             params.tickLower,
             params.tickUpper,
             params.pool
         );
         
-        // Get actual balances after swaps
-        uint256 actualBalance0 = IERC20(token0).balanceOf(address(this));
-        uint256 actualBalance1 = IERC20(token1).balanceOf(address(this));
+        // Execute swaps based on provided routes
+        uint256 actualBalance0 = 0;
+        uint256 actualBalance1 = 0;
+        
+        if (params.routes.length == 0) {
+            // No swaps - check if USDC is one of the tokens
+            if (token0 == USDC) {
+                actualBalance0 = params.usdcAmount;
+            } else if (token1 == USDC) {
+                actualBalance1 = params.usdcAmount;
+            } else {
+                revert("No routes provided and USDC is not a pool token");
+            }
+        } else {
+            // Check if we should optimize for single intermediate token
+            if (_shouldOptimizeRoute(params.routes, token0, token1)) {
+                _executeOptimizedRoute(params.routes, params.usdcAmount, token0, token1, swapAmounts, effectiveSlippage);
+            } else {
+                // Execute swaps for each route
+                for (uint256 i = 0; i < params.routes.length; i++) {
+                    require(params.routes[i].tokenOut == token0 || params.routes[i].tokenOut == token1, "Invalid tokenOut");
+                    
+                    uint256 amountOut = _executeRouteSwap(
+                        USDC,
+                        params.routes[i],
+                        swapAmounts[i],
+                        effectiveSlippage
+                    );
+                    
+                    if (params.routes[i].tokenOut == token0) {
+                        actualBalance0 += amountOut;
+                    } else {
+                        actualBalance1 += amountOut;
+                    }
+                }
+            }
+            
+            // Get final balances
+            actualBalance0 = IERC20(token0).balanceOf(address(this));
+            actualBalance1 = IERC20(token1).balanceOf(address(this));
+        }
         
         console.log("\\n=== Minting position ===");
         console.log("Actual balance0:", actualBalance0);
@@ -1957,5 +2033,304 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         bytes calldata
     ) external pure override returns (bytes4) {
         return this.onERC721Received.selector;
+    }
+    
+    /**
+     * @notice Validates if a pool is from the official factory
+     * @param pool The pool address to validate
+     * @return isValid True if the pool is valid
+     */
+    function _isValidPool(address pool) internal view returns (bool isValid) {
+        if (pool == address(0)) return false;
+        
+        try ICLPool(pool).factory() returns (address factory) {
+            return factory == address(CL_FACTORY);
+        } catch {
+            return false;
+        }
+    }
+    
+    /**
+     * @notice Calculates optimal swap amounts for provided routes
+     * @param routes The swap routes
+     * @param totalUSDC Total USDC amount available
+     * @param token0 Token0 of the target pool
+     * @param token1 Token1 of the target pool
+     * @param tickLower Lower tick of the position
+     * @param tickUpper Upper tick of the position
+     * @param pool The target pool address
+     * @return swapAmounts Array of amounts to swap for each route
+     */
+    function _calculateSwapAmounts(
+        SwapRoute[] memory routes,
+        uint256 totalUSDC,
+        address token0,
+        address token1,
+        int24 tickLower,
+        int24 tickUpper,
+        address pool
+    ) internal view returns (uint256[] memory swapAmounts) {
+        swapAmounts = new uint256[](routes.length);
+        
+        // If no routes, no swaps needed
+        if (routes.length == 0) {
+            return swapAmounts;
+        }
+        
+        // Check if amounts are pre-specified
+        uint256 totalSpecified = 0;
+        for (uint256 i = 0; i < routes.length; i++) {
+            totalSpecified += routes[i].amountIn;
+        }
+        
+        if (totalSpecified > 0) {
+            // Use specified amounts
+            require(totalSpecified <= totalUSDC, "Specified amounts exceed total USDC");
+            for (uint256 i = 0; i < routes.length; i++) {
+                swapAmounts[i] = routes[i].amountIn;
+            }
+            return swapAmounts;
+        }
+        
+        // Calculate optimal split based on tick position
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+        uint160 sqrtRatioAX96 = _getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = _getSqrtRatioAtTick(tickUpper);
+        
+        // Determine how much we need of each token
+        if (sqrtPriceX96 <= sqrtRatioAX96) {
+            // Below range - need 100% token0
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == token0) {
+                    swapAmounts[i] = totalUSDC;
+                }
+            }
+        } else if (sqrtPriceX96 >= sqrtRatioBX96) {
+            // Above range - need 100% token1
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == token1) {
+                    swapAmounts[i] = totalUSDC;
+                }
+            }
+        } else {
+            // In range - calculate split
+            uint256 priceRatio = ((uint256(sqrtPriceX96) - uint256(sqrtRatioAX96)) * 1e18) / 
+                                 (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
+            
+            uint256 amountForToken1 = (totalUSDC * priceRatio) / 1e18;
+            uint256 amountForToken0 = totalUSDC - amountForToken1;
+            
+            // Distribute to routes based on output token
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == token0) {
+                    swapAmounts[i] = amountForToken0;
+                } else if (routes[i].tokenOut == token1) {
+                    swapAmounts[i] = amountForToken1;
+                }
+            }
+        }
+        
+        return swapAmounts;
+    }
+    
+    /**
+     * @notice Executes a swap using the provided route
+     * @param tokenIn The input token (USDC)
+     * @param route The swap route to execute
+     * @param amountIn The amount to swap
+     * @param slippageBps Slippage tolerance in basis points
+     * @return amountOut The amount received from the swap
+     */
+    function _executeRouteSwap(
+        address tokenIn,
+        SwapRoute memory route,
+        uint256 amountIn,
+        uint256 slippageBps
+    ) internal returns (uint256 amountOut) {
+        if (amountIn == 0) {
+            return 0;
+        }
+        
+        require(route.pools.length > 0, "Empty route");
+        
+        _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
+        
+        if (route.pools.length == 1) {
+            // Direct swap
+            int24 tickSpacing = ICLPool(route.pools[0]).tickSpacing();
+            return _swapExactInput(tokenIn, route.tokenOut, amountIn, 0, tickSpacing);
+        } else {
+            // Multi-hop swap
+            bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
+            bytes[] memory inputs = new bytes[](1);
+            
+            // Build path
+            bytes memory path = abi.encodePacked(tokenIn);
+            address currentToken = tokenIn;
+            
+            for (uint256 i = 0; i < route.pools.length; i++) {
+                ICLPool pool = ICLPool(route.pools[i]);
+                uint24 fee = CL_FACTORY.tickSpacingToFee(pool.tickSpacing());
+                
+                // Determine next token
+                address token0 = pool.token0();
+                address token1 = pool.token1();
+                address nextToken;
+                
+                if (i == route.pools.length - 1) {
+                    // Last hop - must end with route.tokenOut
+                    nextToken = route.tokenOut;
+                    require(nextToken == token0 || nextToken == token1, "Invalid final token");
+                } else {
+                    // Intermediate hop - find common token with next pool
+                    ICLPool nextPool = ICLPool(route.pools[i + 1]);
+                    address nextToken0 = nextPool.token0();
+                    address nextToken1 = nextPool.token1();
+                    
+                    if ((token0 == nextToken0 || token0 == nextToken1) && token0 != currentToken) {
+                        nextToken = token0;
+                    } else if ((token1 == nextToken0 || token1 == nextToken1) && token1 != currentToken) {
+                        nextToken = token1;
+                    } else {
+                        revert("No common token between pools");
+                    }
+                }
+                
+                path = abi.encodePacked(path, fee, nextToken);
+                currentToken = nextToken;
+            }
+            
+            // Calculate minimum output with slippage
+            uint256 expectedOut = _quoteMultihopSwap(path, amountIn);
+            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
+            
+            inputs[0] = abi.encode(
+                address(this),  // recipient
+                amountIn,       // amountIn
+                minOut,         // amountOutMinimum
+                path,           // multi-hop path
+                true,           // payerIsUser
+                true            // useSlipstreamPools
+            );
+            
+            uint256 balanceBefore = IERC20(route.tokenOut).balanceOf(address(this));
+            UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
+            amountOut = IERC20(route.tokenOut).balanceOf(address(this)) - balanceBefore;
+        }
+    }
+    
+    /**
+     * @notice Quotes a multi-hop swap
+     * @param path The encoded swap path
+     * @param amountIn The input amount
+     * @return amountOut The expected output amount
+     */
+    function _quoteMultihopSwap(bytes memory path, uint256 amountIn) internal view returns (uint256 amountOut) {
+        try QUOTER.quoteExactInput(path, amountIn) returns (
+            uint256 _amountOut,
+            uint160[] memory,
+            uint32[] memory,
+            uint256
+        ) {
+            return _amountOut;
+        } catch {
+            // If quote fails, return conservative estimate
+            return (amountIn * 90) / 100; // 90% of input as fallback
+        }
+    }
+    
+    /**
+     * @notice Checks if routes can be optimized through a common intermediate token
+     * @param routes The swap routes
+     * @param token0 Token0 of the pool
+     * @param token1 Token1 of the pool
+     * @return True if optimization is possible
+     */
+    function _shouldOptimizeRoute(
+        SwapRoute[] memory routes,
+        address token0,
+        address token1
+    ) internal pure returns (bool) {
+        // Optimization is possible if:
+        // 1. We have exactly 1 route
+        // 2. One of the pool tokens (WETH typically) can be used as intermediate
+        if (routes.length != 1) return false;
+        
+        // Check if the route ends with a token that's not in the pool
+        // and one of the pool tokens could be an intermediate
+        address targetToken = routes[0].tokenOut;
+        
+        // If we're routing to a pool token and the other token is WETH, we can optimize
+        if (targetToken == token1 && token0 == WETH) return true;
+        if (targetToken == token0 && token1 == WETH) return true;
+        
+        return false;
+    }
+    
+    /**
+     * @notice Executes optimized route through intermediate token
+     * @param routes The swap routes
+     * @param usdcAmount Total USDC amount
+     * @param token0 Token0 of the pool
+     * @param token1 Token1 of the pool
+     * @param swapAmounts Calculated swap amounts
+     * @param slippageBps Slippage tolerance
+     */
+    function _executeOptimizedRoute(
+        SwapRoute[] memory routes,
+        uint256 usdcAmount,
+        address token0,
+        address token1,
+        uint256[] memory swapAmounts,
+        uint256 slippageBps
+    ) internal {
+        // Determine intermediate token (usually WETH)
+        address intermediateToken = token0 == WETH ? token0 : token1;
+        address targetToken = routes[0].tokenOut;
+        
+        require(intermediateToken == WETH, "Optimization only supported for WETH");
+        require(targetToken == token0 || targetToken == token1, "Invalid target token");
+        
+        // First, swap all USDC to intermediate token (WETH)
+        address usdcToIntermediatePool = routes[0].pools[0];
+        _safeApprove(USDC, address(UNIVERSAL_ROUTER), usdcAmount);
+        
+        int24 tickSpacing = ICLPool(usdcToIntermediatePool).tickSpacing();
+        uint256 intermediateAmount = _swapExactInput(
+            USDC,
+            intermediateToken,
+            usdcAmount,
+            0,
+            tickSpacing
+        );
+        
+        // Now we have all funds in intermediate token
+        // Calculate how much to keep vs swap
+        uint256 amountToSwap = 0;
+        
+        if (targetToken != intermediateToken) {
+            // Need to swap some intermediate token to target token
+            // The swapAmounts array tells us how much USDC worth to swap
+            // We need to calculate the proportional amount of intermediate token
+            
+            if (swapAmounts[0] > 0 && usdcAmount > 0) {
+                amountToSwap = (intermediateAmount * swapAmounts[0]) / usdcAmount;
+            }
+            
+            if (amountToSwap > 0 && amountToSwap < intermediateAmount) {
+                // Execute the swap from intermediate to target
+                address intermediateToTargetPool = routes[0].pools[1];
+                _safeApprove(intermediateToken, address(UNIVERSAL_ROUTER), amountToSwap);
+                
+                tickSpacing = ICLPool(intermediateToTargetPool).tickSpacing();
+                _swapExactInput(
+                    intermediateToken,
+                    targetToken,
+                    amountToSwap,
+                    0,
+                    tickSpacing
+                );
+            }
+        }
     }
 }
