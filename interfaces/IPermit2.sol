@@ -56,4 +56,17 @@ interface IPermit2 {
         uint160 amount,
         address token
     ) external;
+    
+    function allowance(
+        address owner,
+        address token,
+        address spender
+    ) external view returns (uint160 amount, uint48 expiration, uint48 nonce);
+    
+    function approve(
+        address token,
+        address spender,
+        uint160 amount,
+        uint48 expiration
+    ) external;
 }
