@@ -36,7 +36,7 @@ abstract contract AtomicBase {
         _;
     }
     
-    function _validatePool(address pool, address factory) internal view {
+    function _validatePool(address pool, address) internal pure {
         if (pool == address(0)) {
             revert InvalidPool(pool);
         }
@@ -45,23 +45,6 @@ abstract contract AtomicBase {
         // The actual pool verification happens when we derive tokens from it
     }
     
-    function _getAndValidatePool(
-        address token0, 
-        address token1, 
-        int24 tickSpacing, 
-        address factory
-    ) internal view returns (address pool) {
-        (bool success, bytes memory data) = factory.staticcall(
-            abi.encodeWithSignature("getPool(address,address,int24)", token0, token1, tickSpacing)
-        );
-        
-        require(success, "Factory call failed");
-        pool = abi.decode(data, (address));
-        
-        if (pool == address(0)) {
-            revert InvalidPool(pool);
-        }
-    }
     
     function _checkSlippage(
         uint256 expected,
