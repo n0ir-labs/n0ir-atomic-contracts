@@ -212,6 +212,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param deadline The deadline timestamp for the transaction
      * @param swapToUsdc Whether to swap all assets to USDC on exit
      * @param slippageBps Custom slippage tolerance in basis points (0 = use default)
+     * @param routes Array of swap routes for converting tokens to USDC (if swapping)
      */
     struct ExitParams {
         uint256 tokenId;
@@ -219,6 +220,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint256 deadline;
         bool swapToUsdc;
         uint256 slippageBps;
+        SwapRoute[] routes;
     }
     
     /**
@@ -519,6 +521,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         onlyCDPWallet
         nonReentrant
         deadlineCheck(params.deadline)
+        validateRoutes(params.routes)
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
         console.log("fullExit called for tokenId:", params.tokenId);
@@ -610,7 +613,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         POSITION_MANAGER.burn(params.tokenId);
         
         if (params.swapToUsdc) {
-            usdcOut = _swapAllToUsdc(token0, token1, amount0, amount1, aeroRewards, effectiveSlippage);
+            usdcOut = _swapAllToUsdc(token0, token1, amount0, amount1, aeroRewards, params.routes, effectiveSlippage);
             require(usdcOut >= params.minUsdcOut, "Insufficient USDC output");
             _safeTransfer(USDC, msg.sender, usdcOut);
         } else {
@@ -1004,13 +1007,14 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
-     * @notice Swaps all tokens to USDC
+     * @notice Swaps all tokens to USDC using provided routes
      * @dev Used during exit to convert all assets to USDC
      * @param token0 The address of token0
      * @param token1 The address of token1
      * @param amount0 The amount of token0 to swap
      * @param amount1 The amount of token1 to swap
      * @param aeroAmount The amount of AERO to swap
+     * @param routes Array of swap routes for each token
      * @param slippageBps The slippage tolerance in basis points
      * @return totalUsdc The total USDC received from all swaps
      */
@@ -1020,31 +1024,56 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         uint256 amount0,
         uint256 amount1,
         uint256 aeroAmount,
+        SwapRoute[] memory routes,
         uint256 slippageBps
     ) internal returns (uint256 totalUsdc) {
+        // Handle token0
         if (token0 == USDC) {
             totalUsdc += amount0;
         } else if (amount0 > 0) {
-            // Calculate minimum output with slippage protection
-            uint256 expectedOut = _quoteUSDCFromToken(token0, amount0);
-            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
-            totalUsdc += _swapExactInput(token0, USDC, amount0, minOut, _getTickSpacingForPair(token0, USDC));
+            // Find route for token0
+            bool foundRoute = false;
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == USDC && _isRouteForToken(routes[i], token0)) {
+                    uint256 usdcOut = _executeExitRouteSwap(token0, routes[i], amount0, slippageBps);
+                    totalUsdc += usdcOut;
+                    foundRoute = true;
+                    break;
+                }
+            }
+            require(foundRoute, "No route found for token0");
         }
         
+        // Handle token1
         if (token1 == USDC) {
             totalUsdc += amount1;
         } else if (amount1 > 0) {
-            // Calculate minimum output with slippage protection
-            uint256 expectedOut = _quoteUSDCFromToken(token1, amount1);
-            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
-            totalUsdc += _swapExactInput(token1, USDC, amount1, minOut, _getTickSpacingForPair(token1, USDC));
+            // Find route for token1
+            bool foundRoute = false;
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == USDC && _isRouteForToken(routes[i], token1)) {
+                    uint256 usdcOut = _executeExitRouteSwap(token1, routes[i], amount1, slippageBps);
+                    totalUsdc += usdcOut;
+                    foundRoute = true;
+                    break;
+                }
+            }
+            require(foundRoute, "No route found for token1");
         }
         
+        // Handle AERO rewards
         if (aeroAmount > 0) {
-            // Calculate minimum output with slippage protection
-            uint256 expectedOut = _quoteUSDCFromToken(AERO, aeroAmount);
-            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
-            totalUsdc += _swapExactInput(AERO, USDC, aeroAmount, minOut, _getTickSpacingForPair(AERO, USDC));
+            // Find route for AERO
+            bool foundRoute = false;
+            for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].tokenOut == USDC && _isRouteForToken(routes[i], AERO)) {
+                    uint256 usdcOut = _executeExitRouteSwap(AERO, routes[i], aeroAmount, slippageBps);
+                    totalUsdc += usdcOut;
+                    foundRoute = true;
+                    break;
+                }
+            }
+            require(foundRoute, "No route found for AERO");
         }
     }
     
@@ -2331,6 +2360,102 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
                     tickSpacing
                 );
             }
+        }
+    }
+    
+    /**
+     * @notice Checks if a route is valid for a given input token
+     * @param route The swap route
+     * @param tokenIn The input token to check
+     * @return True if route starts with tokenIn
+     */
+    function _isRouteForToken(SwapRoute memory route, address tokenIn) internal view returns (bool) {
+        if (route.pools.length == 0) return false;
+        
+        // Check if first pool contains tokenIn
+        ICLPool firstPool = ICLPool(route.pools[0]);
+        return firstPool.token0() == tokenIn || firstPool.token1() == tokenIn;
+    }
+    
+    /**
+     * @notice Executes a swap route for exit (token -> USDC)
+     * @param tokenIn The input token
+     * @param route The swap route
+     * @param amountIn The amount to swap
+     * @param slippageBps Slippage tolerance
+     * @return amountOut The USDC received
+     */
+    function _executeExitRouteSwap(
+        address tokenIn,
+        SwapRoute memory route,
+        uint256 amountIn,
+        uint256 slippageBps
+    ) internal returns (uint256 amountOut) {
+        require(route.tokenOut == USDC, "Exit routes must end with USDC");
+        
+        _safeApprove(tokenIn, address(UNIVERSAL_ROUTER), amountIn);
+        
+        if (route.pools.length == 1) {
+            // Direct swap
+            int24 tickSpacing = ICLPool(route.pools[0]).tickSpacing();
+            return _swapExactInput(tokenIn, USDC, amountIn, 0, tickSpacing);
+        } else {
+            // Multi-hop swap
+            bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
+            bytes[] memory inputs = new bytes[](1);
+            
+            // Build path
+            bytes memory path = abi.encodePacked(tokenIn);
+            address currentToken = tokenIn;
+            
+            for (uint256 i = 0; i < route.pools.length; i++) {
+                ICLPool pool = ICLPool(route.pools[i]);
+                uint24 fee = CL_FACTORY.tickSpacingToFee(pool.tickSpacing());
+                
+                // Determine next token
+                address token0 = pool.token0();
+                address token1 = pool.token1();
+                address nextToken;
+                
+                if (i == route.pools.length - 1) {
+                    // Last hop must end with USDC
+                    nextToken = USDC;
+                    require(nextToken == token0 || nextToken == token1, "Invalid final token");
+                } else {
+                    // Find common token with next pool
+                    ICLPool nextPool = ICLPool(route.pools[i + 1]);
+                    address nextToken0 = nextPool.token0();
+                    address nextToken1 = nextPool.token1();
+                    
+                    if ((token0 == nextToken0 || token0 == nextToken1) && token0 != currentToken) {
+                        nextToken = token0;
+                    } else if ((token1 == nextToken0 || token1 == nextToken1) && token1 != currentToken) {
+                        nextToken = token1;
+                    } else {
+                        revert("No common token between pools");
+                    }
+                }
+                
+                path = abi.encodePacked(path, fee, nextToken);
+                currentToken = nextToken;
+            }
+            
+            // Quote the swap for slippage protection
+            uint256 expectedOut = _quoteMultihopSwap(path, amountIn);
+            uint256 minOut = _calculateMinimumOutput(expectedOut, slippageBps);
+            
+            inputs[0] = abi.encode(
+                address(this),  // recipient
+                amountIn,       // amountIn
+                minOut,         // amountOutMinimum
+                path,           // multi-hop path
+                true,           // payerIsUser
+                true            // useSlipstreamPools
+            );
+            
+            uint256 balanceBefore = IERC20(USDC).balanceOf(address(this));
+            UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
+            amountOut = IERC20(USDC).balanceOf(address(this)) - balanceBefore;
         }
     }
 }
