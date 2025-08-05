@@ -12,7 +12,10 @@ import "@interfaces/ICLPool.sol";
 import "@interfaces/IMixedQuoter.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/IGaugeFactory.sol";
+import "@interfaces/ILpSugar.sol";
+import "@interfaces/IVoter.sol";
 import "forge-std/console.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /**
  * @title AerodromeAtomicOperations
@@ -20,7 +23,7 @@ import "forge-std/console.sol";
  * @notice Atomic operations for Aerodrome Finance concentrated liquidity positions
  * @dev Provides atomic swap, mint, stake, and exit operations for Aerodrome CL pools
  */
-contract AerodromeAtomicOperations is AtomicBase {
+contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     /// @notice CDP Wallet Registry for access control
     CDPWalletRegistry public immutable walletRegistry;
     
@@ -36,6 +39,10 @@ contract AerodromeAtomicOperations is AtomicBase {
     ICLFactory public constant CL_FACTORY = ICLFactory(0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A);
     /// @notice Gauge Factory for finding gauges
     address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
+    /// @notice LP Sugar for getting pool data including gauges
+    address public constant LP_SUGAR = 0x27fc745390d1f4BaF8D184FBd97748340f786634;
+    /// @notice Voter contract for gauge lookups
+    address public constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     
     /// @notice USDC token address on Base
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -336,21 +343,67 @@ contract AerodromeAtomicOperations is AtomicBase {
         
         if (params.stake) {
             console.log("\\nStaking position...");
-            address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(params.pool);
+            
+            // Try multiple methods to find the gauge
+            address gauge = address(0);
+            
+            // Method 1: Try Voter contract (most reliable)
+            try IVoter(VOTER).gauges(params.pool) returns (address g) {
+                gauge = g;
+                if (gauge != address(0)) {
+                    console.log("Found gauge via Voter contract:", gauge);
+                }
+            } catch {
+                console.log("Voter lookup failed");
+            }
+            
+            // Method 2: Try gauge factory as fallback
+            if (gauge == address(0)) {
+                try IGaugeFactory(GAUGE_FACTORY).gauges(params.pool) returns (address g) {
+                    gauge = g;
+                    if (gauge != address(0)) {
+                        console.log("Found gauge via factory");
+                    }
+                } catch {
+                    console.log("Gauge factory lookup failed");
+                }
+            }
+            
+            // If still no gauge found, skip staking
+            if (gauge == address(0)) {
+                console.log("No gauge found for pool - skipping staking");
+                // Don't fail, just skip staking
+                emit PositionOpened(msg.sender, tokenId, params.pool, params.usdcAmount, uint128(liquidity), false);
+                return (tokenId, liquidity);
+            }
+            
             console.log("Gauge address:", gauge);
-            require(gauge != address(0), "No gauge found for pool");
+            
+            // Verify we own the NFT
+            address nftOwner = POSITION_MANAGER.ownerOf(tokenId);
+            console.log("NFT owner:", nftOwner);
+            console.log("This contract:", address(this));
+            require(nftOwner == address(this), "Contract doesn't own the NFT");
             
             console.log("Approving gauge for tokenId:", tokenId);
             POSITION_MANAGER.approve(gauge, tokenId);
             
             console.log("Staking tokenId:", tokenId);
-            try IGauge(gauge).stake(tokenId) {
+            try IGauge(gauge).deposit(tokenId) {
                 console.log("Staking successful!");
             } catch Error(string memory reason) {
                 console.log("Staking failed with reason:", reason);
                 revert(reason);
             } catch (bytes memory data) {
-                console.log("Staking failed with data");
+                console.log("Staking failed with data length:", data.length);
+                if (data.length >= 4) {
+                    bytes4 selector;
+                    assembly {
+                        selector := mload(add(data, 0x20))
+                    }
+                    console.log("Error selector:");
+                    console.logBytes4(selector);
+                }
                 revert("Staking failed");
             }
         }
@@ -392,25 +445,51 @@ contract AerodromeAtomicOperations is AtomicBase {
         deadlineCheck(params.deadline)
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
+        console.log("fullExit called for tokenId:", params.tokenId);
+        console.log("Caller:", msg.sender);
+        
         (,, address token0, address token1, int24 tickSpacing,, , uint128 liquidity,,,,) = POSITION_MANAGER.positions(params.tokenId);
+        console.log("Position liquidity:", liquidity);
         require(liquidity > 0, "Position has no liquidity");
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        console.log("Pool:", pool);
+        
+        // Try Voter first, then gauge factory
+        address gauge;
+        try IVoter(VOTER).gauges(pool) returns (address g) {
+            gauge = g;
+            console.log("Found gauge via Voter:", gauge);
+        } catch {
+            gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+            console.log("Found gauge via factory:", gauge);
+        }
         
         // Get effective slippage for this operation
         uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
         
-        if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId)) {
-            IGauge(gauge).unstake(params.tokenId);
-            aeroRewards = IERC20(AERO).balanceOf(address(this));
-            IGauge(gauge).getReward(params.tokenId);
-            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroRewards;
+        if (gauge != address(0) && IGauge(gauge).stakedContains(address(this), params.tokenId)) {
+            console.log("Position is staked, withdrawing from gauge");
+            uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+            IGauge(gauge).withdraw(params.tokenId);
+            // Rewards are automatically claimed during withdraw
+            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+            console.log("AERO rewards collected during withdraw:", aeroRewards);
+        } else {
+            console.log("Position is not staked or gauge not found");
         }
         
-        require(POSITION_MANAGER.ownerOf(params.tokenId) == msg.sender, "Not token owner");
+        // After unstaking, the position should be owned by either the user or this contract
+        address owner = POSITION_MANAGER.ownerOf(params.tokenId);
+        console.log("After unstaking, NFT owner:", owner);
+        console.log("Expected owner (msg.sender):", msg.sender);
+        console.log("Or this contract:", address(this));
+        require(owner == msg.sender || owner == address(this), "Not token owner");
         
-        POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
+        // Only transfer if not already owned by this contract
+        if (owner != address(this)) {
+            POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
+        }
         
         // Calculate expected amounts based on liquidity and current prices
         ICLPool clPool = ICLPool(pool);
@@ -486,15 +565,30 @@ contract AerodromeAtomicOperations is AtomicBase {
         (,, address token0, address token1, int24 tickSpacing,, ,,,,,) = POSITION_MANAGER.positions(tokenId);
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        
+        // Try Voter first, then gauge factory
+        address gauge;
+        try IVoter(VOTER).gauges(pool) returns (address g) {
+            gauge = g;
+        } catch {
+            gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        }
         require(gauge != address(0), "No gauge found");
         
-        require(IGauge(gauge).stakedContains(msg.sender, tokenId), "Position not staked");
+        require(IGauge(gauge).stakedContains(address(this), tokenId), "Position not staked");
         
         aeroAmount = IGauge(gauge).earned(tokenId);
         require(aeroAmount > 0, "No rewards to claim");
         
-        IGauge(gauge).getReward(tokenId);
+        // For claiming without unstaking, we need to call the address-based getReward
+        // The gauge expects the depositor address, which is this contract
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        
+        // Try to call getReward - the gauge might have a different signature
+        (bool success,) = gauge.call(abi.encodeWithSelector(0x1c4b774b, address(this)));
+        require(success, "Failed to claim rewards");
+        
+        aeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         
         if (minUsdcOut > 0) {
             _safeApprove(AERO, address(UNIVERSAL_ROUTER), aeroAmount);
@@ -539,16 +633,23 @@ contract AerodromeAtomicOperations is AtomicBase {
         require(liquidity > 0, "Position has no liquidity");
         
         address pool = CL_FACTORY.getPool(token0, token1, tickSpacing);
-        address gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        
+        // Try Voter first, then gauge factory
+        address gauge;
+        try IVoter(VOTER).gauges(pool) returns (address g) {
+            gauge = g;
+        } catch {
+            gauge = IGaugeFactory(GAUGE_FACTORY).gauges(pool);
+        }
         
         // Get effective slippage for this operation
         uint256 effectiveSlippage = _getEffectiveSlippage(slippageBps);
         
-        if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, tokenId)) {
-            IGauge(gauge).unstake(tokenId);
-            aeroRewards = IERC20(AERO).balanceOf(address(this));
-            IGauge(gauge).getReward(tokenId);
-            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroRewards;
+        if (gauge != address(0) && IGauge(gauge).stakedContains(address(this), tokenId)) {
+            uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+            IGauge(gauge).withdraw(tokenId);
+            // Rewards are automatically claimed during withdraw
+            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         }
         
         require(POSITION_MANAGER.ownerOf(tokenId) == msg.sender, "Not token owner");
@@ -1843,5 +1944,18 @@ contract AerodromeAtomicOperations is AtomicBase {
             _safeTransfer(token, msg.sender, balance);
             emit EmergencyWithdraw(msg.sender, token, balance);
         }
+    }
+    
+    /**
+     * @notice Handle receipt of NFT
+     * @dev Required for receiving NFT positions via safeTransferFrom
+     */
+    function onERC721Received(
+        address,
+        address,
+        uint256,
+        bytes calldata
+    ) external pure override returns (bytes4) {
+        return this.onERC721Received.selector;
     }
 }

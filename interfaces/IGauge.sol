@@ -2,9 +2,9 @@
 pragma solidity 0.8.26;
 
 interface IGauge {
-    function stake(uint256 tokenId) external;
+    function deposit(uint256 tokenId) external;
     
-    function unstake(uint256 tokenId) external;
+    function withdraw(uint256 tokenId) external;
     
     function getReward(uint256 tokenId) external;
     

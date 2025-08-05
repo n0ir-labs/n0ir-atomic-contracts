@@ -318,7 +318,7 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: usdcAmount,
             minLiquidity: 0, // Accept any liquidity for testing
             deadline: block.timestamp + 3600,
-            stake: false, // Changed to false - this pool might not have a gauge
+            stake: true, // Test with staking enabled
             slippageBps: 0 // Use default slippage
         });
         
