@@ -12,6 +12,8 @@ interface ICLPool {
     
     function liquidity() external view returns (uint128);
     
+    function factory() external view returns (address);
+    
     function slot0()
         external
         view

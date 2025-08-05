@@ -2408,7 +2408,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
      * @param amountIn The input amount
      * @return amountOut The expected output amount
      */
-    function _quoteMultihopSwap(bytes memory path, uint256 amountIn) internal view returns (uint256 amountOut) {
+    function _quoteMultihopSwap(bytes memory path, uint256 amountIn) internal returns (uint256 amountOut) {
         try QUOTER.quoteExactInput(path, amountIn) returns (
             uint256 _amountOut,
             uint160[] memory,
