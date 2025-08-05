@@ -1007,7 +1007,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     }
     
     /**
-     * @notice Swaps all tokens to USDC using provided routes
+     * @notice Swaps all tokens to USDC using provided routes with optimization
      * @dev Used during exit to convert all assets to USDC
      * @param token0 The address of token0
      * @param token1 The address of token1
@@ -1027,6 +1027,18 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         SwapRoute[] memory routes,
         uint256 slippageBps
     ) internal returns (uint256 totalUsdc) {
+        // Check if we can optimize the exit route
+        if (_shouldOptimizeExitRoute(routes, token0, token1)) {
+            return _executeOptimizedExitRoute(
+                token0,
+                token1,
+                amount0,
+                amount1,
+                aeroAmount,
+                routes,
+                slippageBps
+            );
+        }
         // Handle token0
         if (token0 == USDC) {
             totalUsdc += amount0;
@@ -1075,6 +1087,148 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             }
             require(foundRoute, "No route found for AERO");
         }
+    }
+    
+    /**
+     * @notice Checks if exit routes can be optimized through a common intermediate
+     * @param routes The exit routes
+     * @param token0 Token0 from the position
+     * @param token1 Token1 from the position
+     * @return True if optimization is possible
+     */
+    function _shouldOptimizeExitRoute(
+        SwapRoute[] memory routes,
+        address token0,
+        address token1
+    ) internal pure returns (bool) {
+        // Optimization is possible if:
+        // 1. We have exactly 1 route
+        // 2. One of the tokens is WETH and the other needs to be swapped through it
+        if (routes.length != 1) return false;
+        
+        // Check if one token is WETH and route is for the other token
+        if (token0 == WETH && routes[0].pools.length >= 2) {
+            // Route should be: otherToken -> WETH -> USDC
+            return true;
+        }
+        if (token1 == WETH && routes[0].pools.length >= 2) {
+            // Route should be: otherToken -> WETH -> USDC
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * @notice Executes optimized exit by combining tokens through WETH
+     * @param token0 Token0 from position
+     * @param token1 Token1 from position
+     * @param amount0 Amount of token0
+     * @param amount1 Amount of token1
+     * @param aeroAmount Amount of AERO rewards
+     * @param routes The provided routes
+     * @param slippageBps Slippage tolerance
+     * @return totalUsdc Total USDC received
+     */
+    function _executeOptimizedExitRoute(
+        address token0,
+        address token1,
+        uint256 amount0,
+        uint256 amount1,
+        uint256 aeroAmount,
+        SwapRoute[] memory routes,
+        uint256 slippageBps
+    ) internal returns (uint256 totalUsdc) {
+        // Determine which token is WETH and which needs swapping
+        address wethToken;
+        address otherToken;
+        uint256 wethAmount;
+        uint256 otherAmount;
+        
+        if (token0 == WETH) {
+            wethToken = token0;
+            otherToken = token1;
+            wethAmount = amount0;
+            otherAmount = amount1;
+        } else if (token1 == WETH) {
+            wethToken = token1;
+            otherToken = token0;
+            wethAmount = amount1;
+            otherAmount = amount0;
+        } else {
+            revert("Optimization requires WETH as one token");
+        }
+        
+        // First, swap other token to WETH if amount > 0
+        uint256 totalWeth = wethAmount;
+        if (otherAmount > 0 && otherToken != USDC) {
+            // Use first pool in route (should be otherToken -> WETH)
+            address otherToWethPool = routes[0].pools[0];
+            _safeApprove(otherToken, address(UNIVERSAL_ROUTER), otherAmount);
+            
+            int24 tickSpacing = ICLPool(otherToWethPool).tickSpacing();
+            uint256 wethFromOther = _swapExactInput(
+                otherToken,
+                WETH,
+                otherAmount,
+                0,
+                tickSpacing
+            );
+            totalWeth += wethFromOther;
+        } else if (otherToken == USDC) {
+            // If other token is USDC, add it directly to total
+            totalUsdc += otherAmount;
+        }
+        
+        // Handle AERO rewards if any
+        if (aeroAmount > 0) {
+            // Check if we have a direct AERO -> WETH pool in routes
+            bool foundAeroRoute = false;
+            for (uint256 i = 0; i < routes[0].pools.length; i++) {
+                ICLPool pool = ICLPool(routes[0].pools[i]);
+                if ((pool.token0() == AERO || pool.token1() == AERO) && 
+                    (pool.token0() == WETH || pool.token1() == WETH)) {
+                    // Found AERO/WETH pool
+                    _safeApprove(AERO, address(UNIVERSAL_ROUTER), aeroAmount);
+                    int24 tickSpacing = pool.tickSpacing();
+                    uint256 wethFromAero = _swapExactInput(
+                        AERO,
+                        WETH,
+                        aeroAmount,
+                        0,
+                        tickSpacing
+                    );
+                    totalWeth += wethFromAero;
+                    foundAeroRoute = true;
+                    break;
+                }
+            }
+            
+            if (!foundAeroRoute) {
+                // If no AERO -> WETH route, try direct AERO -> USDC
+                // This would need a separate route provided by SDK
+                revert("No AERO route found for optimization");
+            }
+        }
+        
+        // Now swap all WETH to USDC in one transaction
+        if (totalWeth > 0) {
+            // Use the WETH -> USDC pool (should be last pool in route)
+            address wethToUsdcPool = routes[0].pools[routes[0].pools.length - 1];
+            _safeApprove(WETH, address(UNIVERSAL_ROUTER), totalWeth);
+            
+            int24 tickSpacing = ICLPool(wethToUsdcPool).tickSpacing();
+            uint256 usdcFromWeth = _swapExactInput(
+                WETH,
+                USDC,
+                totalWeth,
+                0,
+                tickSpacing
+            );
+            totalUsdc += usdcFromWeth;
+        }
+        
+        return totalUsdc;
     }
     
     /**
