@@ -1308,9 +1308,11 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         bytes memory commands = abi.encodePacked(bytes1(0x01));
         bytes[] memory inputs = new bytes[](1);
         
-        // Get pool fee from factory
+        // Get pool and its actual fee
         int24 tickSpacing = _getTickSpacingForPair(tokenIn, tokenOut);
-        uint24 fee = CL_FACTORY.tickSpacingToFee(tickSpacing);
+        address pool = CL_FACTORY.getPool(tokenIn, tokenOut, tickSpacing);
+        require(pool != address(0), "Pool not found");
+        uint24 fee = ICLPool(pool).fee(); // Use actual fee from pool
         
         // For exact output, path is reversed (tokenOut -> tokenIn)
         inputs[0] = abi.encode(
@@ -2353,7 +2355,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             
             for (uint256 i = 0; i < route.pools.length; i++) {
                 ICLPool pool = ICLPool(route.pools[i]);
-                uint24 fee = CL_FACTORY.tickSpacingToFee(pool.tickSpacing());
+                uint24 fee = pool.fee(); // Use actual fee from pool, not factory mapping
                 
                 // Determine next token
                 address token0 = pool.token0();
@@ -2564,7 +2566,7 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             
             for (uint256 i = 0; i < route.pools.length; i++) {
                 ICLPool pool = ICLPool(route.pools[i]);
-                uint24 fee = CL_FACTORY.tickSpacingToFee(pool.tickSpacing());
+                uint24 fee = pool.fee(); // Use actual fee from pool, not factory mapping
                 
                 // Determine next token
                 address token0 = pool.token0();
