@@ -54,7 +54,7 @@ Then edit `.env` with your configuration:
 First, test the deployment without broadcasting:
 
 ```bash
-forge script script/Deploy.s.sol:Deploy \
+forge script scripts/Deploy.s.sol:Deploy \
   --rpc-url $BASE_RPC_URL
 ```
 
@@ -62,7 +62,7 @@ forge script script/Deploy.s.sol:Deploy \
 Deploy to Base Sepolia testnet:
 
 ```bash
-forge script script/Deploy.s.sol:Deploy \
+forge script scripts/Deploy.s.sol:Deploy \
   --rpc-url https://sepolia.base.org \
   --broadcast
 ```
@@ -71,7 +71,7 @@ forge script script/Deploy.s.sol:Deploy \
 Deploy to Base mainnet with verification:
 
 ```bash
-forge script script/DeployWithVerification.s.sol:DeployWithVerification \
+forge script scripts/DeployWithVerification.s.sol:DeployWithVerification \
   --rpc-url $BASE_RPC_URL \
   --broadcast \
   --verify \

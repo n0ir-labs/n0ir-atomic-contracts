@@ -25,9 +25,6 @@ contract LocalTest is Script {
     address constant TEST_WALLET_2 = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
     address constant TEST_WALLET_3 = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
     
-    // Whale addresses for token funding
-    address constant USDC_WHALE = 0x4c5d8A75F3762c1561D96f177694f67378705E98; // Large USDC holder on Base
-    
     function run() external {
         console.log("\n========================================");
         console.log("n0ir Protocol - Local Fork Deployment");
@@ -58,8 +55,8 @@ contract LocalTest is Script {
     function _deployContracts() private {
         console.log("Deploying contracts...");
         
-        // Deploy CDPWalletRegistry
-        registry = new CDPWalletRegistry(TEST_WALLET_1);
+        // Deploy CDPWalletRegistry (will be owned by msg.sender = TEST_WALLET_1)
+        registry = new CDPWalletRegistry();
         console.log("  CDPWalletRegistry:", address(registry));
         
         // Deploy n0ir Protocol
@@ -84,20 +81,18 @@ contract LocalTest is Script {
     function _fundTestWallets() private {
         console.log("Funding test wallets with USDC...");
         
-        // Impersonate USDC whale
         vm.stopBroadcast();
-        vm.startPrank(USDC_WHALE);
         
-        // Fund each test wallet with 10,000 USDC
+        // Fund each test wallet with 10,000 USDC using deal
         uint256 fundAmount = 10_000 * 1e6; // 10,000 USDC (6 decimals)
         
-        IERC20(USDC).transfer(TEST_WALLET_1, fundAmount);
-        IERC20(USDC).transfer(TEST_WALLET_2, fundAmount);
-        IERC20(USDC).transfer(TEST_WALLET_3, fundAmount);
+        // Use deal to set USDC balance directly
+        deal(USDC, TEST_WALLET_1, fundAmount);
+        deal(USDC, TEST_WALLET_2, fundAmount);
+        deal(USDC, TEST_WALLET_3, fundAmount);
         
         console.log("  Funded each wallet with 10,000 USDC");
         
-        vm.stopPrank();
         vm.startBroadcast(TEST_WALLET_1);
         
         // Check balances

@@ -98,8 +98,14 @@ contract DeployWithVerification is Script {
      */
     function _deployContracts() private {
         console.log("[1/2] Deploying CDPWalletRegistry...");
-        registry = new CDPWalletRegistry(config.owner);
+        registry = new CDPWalletRegistry();
         console.log("      \u2713 Deployed at:", address(registry));
+        
+        // Transfer ownership if needed
+        if (config.owner != msg.sender) {
+            registry.transferOwnership(config.owner);
+            console.log("      \u2713 Ownership transferred to:", config.owner);
+        }
         
         console.log("[2/2] Deploying n0ir Protocol...");
         n0irProtocol = new N0irProtocol(address(registry));

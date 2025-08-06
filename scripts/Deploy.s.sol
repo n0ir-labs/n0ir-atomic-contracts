@@ -39,8 +39,14 @@ contract Deploy is Script {
         
         // Deploy CDP Wallet Registry
         console.log("Deploying CDPWalletRegistry...");
-        registry = new CDPWalletRegistry(owner);
+        registry = new CDPWalletRegistry();
         console.log("CDPWalletRegistry deployed at:", address(registry));
+        
+        // Transfer ownership if needed
+        if (owner != deployer) {
+            registry.transferOwnership(owner);
+            console.log("Ownership transferred to:", owner);
+        }
         
         // Deploy n0ir Protocol
         console.log("Deploying n0ir Protocol...");
