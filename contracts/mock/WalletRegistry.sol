@@ -62,13 +62,50 @@ contract WalletRegistry is Ownable {
         emit WalletRemoved(wallet, msg.sender);
     }
     
+    function removeWalletsBatch(address[] calldata wallets) external onlyOwner {
+        uint256 length = wallets.length;
+        require(length > 0, "Empty array");
+        require(length <= 100, "Too large");
+        
+        for (uint256 i = 0; i < length; i++) {
+            address wallet = wallets[i];
+            
+            if (isWallet[wallet]) {
+                isWallet[wallet] = false;
+                totalWallets--;
+                emit WalletRemoved(wallet, msg.sender);
+            }
+        }
+    }
+    
     function setOperator(address operator, bool status) external onlyOwner {
         require(operator != address(0), "Invalid operator");
         isOperator[operator] = status;
         emit OperatorSet(operator, status);
     }
     
+    function setOperatorsBatch(address[] calldata operators, bool status) external onlyOwner {
+        uint256 length = operators.length;
+        require(length > 0, "Empty array");
+        require(length <= 50, "Too large");
+        
+        for (uint256 i = 0; i < length; i++) {
+            require(operators[i] != address(0), "Invalid operator");
+            isOperator[operators[i]] = status;
+            emit OperatorSet(operators[i], status);
+        }
+    }
+    
     function isRegisteredWallet(address wallet) external view returns (bool) {
         return isWallet[wallet];
+    }
+    
+    function areWalletsRegistered(address[] calldata wallets) external view returns (bool[] memory statuses) {
+        uint256 length = wallets.length;
+        statuses = new bool[](length);
+        
+        for (uint256 i = 0; i < length; i++) {
+            statuses[i] = isWallet[wallets[i]];
+        }
     }
 }
