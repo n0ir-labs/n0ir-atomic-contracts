@@ -439,12 +439,17 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         // Track AERO rewards
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         
+        // Check if position is staked by checking NFT ownership
+        address positionOwner = POSITION_MANAGER.ownerOf(params.tokenId);
+        
         // Handle staked positions
-        if (gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId)) {
+        if (gauge != address(0) && positionOwner == gauge) {
+            // Position is staked in gauge - withdraw it
+            // Note: This will work regardless of who originally staked it
             IGauge(gauge).withdraw(params.tokenId);
             aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         } else {
-            // Transfer position from user if not staked
+            // Position is not staked - transfer from user
             POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
         }
         

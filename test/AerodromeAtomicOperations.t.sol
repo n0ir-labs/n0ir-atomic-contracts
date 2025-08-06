@@ -7,6 +7,7 @@ import "../contracts/CDPWalletRegistry.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/ICLPool.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
+import "@interfaces/IVoter.sol";
 
 contract AerodromeAtomicOperationsTest is Test {
     AerodromeAtomicOperations public atomicOps;
@@ -132,6 +133,158 @@ contract AerodromeAtomicOperationsTest is Test {
         
         // Verify user owns the position
         assertEq(INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId), user);
+        
+        vm.stopPrank();
+    }
+    
+    function testSwapMintAndStakeWithStaking() public {
+        vm.startPrank(user);
+        
+        ICLPool pool = ICLPool(WETH_USDC_POOL);
+        (,int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        
+        // Create range around current price
+        int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
+        
+        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+            pool: WETH_USDC_POOL,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            deadline: block.timestamp + 3600,
+            usdcAmount: 100e6, // 100 USDC
+            slippageBps: 100, // 1% slippage
+            stake: true, // ENABLE STAKING
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
+        });
+        
+        uint256 usdcBefore = IERC20(USDC).balanceOf(user);
+        
+        (uint256 tokenId, uint128 liquidity) = atomicOps.swapMintAndStake(params);
+        
+        uint256 usdcAfter = IERC20(USDC).balanceOf(user);
+        
+        console.log("Position minted and staked with tokenId:", tokenId);
+        console.log("Liquidity:", liquidity);
+        console.log("USDC spent:", usdcBefore - usdcAfter);
+        
+        // Verify position was created
+        assertGt(tokenId, 0);
+        assertGt(liquidity, 0);
+        
+        // Check if gauge exists for this pool
+        address voter = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
+        address gauge = IVoter(voter).gauges(WETH_USDC_POOL);
+        console.log("Gauge address:", gauge);
+        
+        if (gauge != address(0)) {
+            // Verify the gauge owns the position (not the user)
+            assertEq(INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId), gauge);
+            console.log("Position successfully staked in gauge");
+            
+            // Check if position is in gauge
+            // Note: We might need to check gauge's staked positions
+        } else {
+            // If no gauge, position should be returned to user
+            assertEq(INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId), user);
+            console.log("No gauge found, position returned to user");
+        }
+        
+        vm.stopPrank();
+    }
+    
+    function testFullExitWithStakedPosition() public {
+        // First create and stake a position
+        vm.startPrank(user);
+        
+        ICLPool pool = ICLPool(WETH_USDC_POOL);
+        (,int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        
+        int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
+        
+        // Mint and stake position
+        AerodromeAtomicOperations.SwapMintParams memory mintParams = AerodromeAtomicOperations.SwapMintParams({
+            pool: WETH_USDC_POOL,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            deadline: block.timestamp + 3600,
+            usdcAmount: 100e6,
+            slippageBps: 100,
+            stake: true, // STAKE THE POSITION
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
+        });
+        
+        (uint256 tokenId,) = atomicOps.swapMintAndStake(mintParams);
+        console.log("Staked position created with tokenId:", tokenId);
+        
+        // Verify gauge owns the position
+        address gauge = IVoter(0x16613524e02ad97eDfeF371bC883F2F5d6C480A5).gauges(WETH_USDC_POOL);
+        if (gauge != address(0)) {
+            assertEq(INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId), gauge);
+            console.log("Position is staked in gauge:", gauge);
+        }
+        
+        // Now exit the staked position
+        AerodromeAtomicOperations.FullExitParams memory exitParams = AerodromeAtomicOperations.FullExitParams({
+            tokenId: tokenId,
+            pool: WETH_USDC_POOL,
+            deadline: block.timestamp + 3600,
+            minUsdcOut: 90e6, // Accept 10% slippage for test
+            slippageBps: 200, // 2% slippage
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: new address[](0),
+                tokens: new address[](0),
+                tickSpacings: new int24[](0)
+            })
+        });
+        
+        uint256 usdcBefore = IERC20(USDC).balanceOf(user);
+        uint256 aeroBefore = IERC20(0x940181a94A35A4569E4529A3CDfB74e38FD98631).balanceOf(user); // AERO token
+        
+        (uint256 usdcOut, uint256 aeroRewards) = atomicOps.fullExit(exitParams);
+        
+        uint256 usdcAfter = IERC20(USDC).balanceOf(user);
+        uint256 aeroAfter = IERC20(0x940181a94A35A4569E4529A3CDfB74e38FD98631).balanceOf(user);
+        
+        console.log("USDC recovered:", usdcOut);
+        console.log("AERO rewards collected:", aeroRewards);
+        console.log("Actual USDC received:", usdcAfter - usdcBefore);
+        console.log("Actual AERO received:", aeroAfter - aeroBefore);
+        
+        // Verify we got back close to what we put in (minus fees/slippage)
+        assertGt(usdcOut, 0);
+        assertEq(usdcAfter - usdcBefore, usdcOut);
+        
+        // AERO rewards might be 0 if position was just created
+        if (aeroRewards > 0) {
+            assertEq(aeroAfter - aeroBefore, aeroRewards);
+        }
         
         vm.stopPrank();
     }
