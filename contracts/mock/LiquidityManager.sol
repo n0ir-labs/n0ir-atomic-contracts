@@ -12,7 +12,6 @@ import "@interfaces/IMixedQuoter.sol";
 import "@interfaces/ISugarHelper.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/IGaugeFactory.sol";
-import "@interfaces/ILpSugar.sol";
 import "@interfaces/IVoter.sol";
 import "@interfaces/IOffchainOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
@@ -162,7 +161,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     USDC,
                     token0,
                     usdc0,
-                    pool.fee(),
+                    params.pool,
                     effectiveSlippage
                 );
             }
@@ -185,7 +184,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     USDC,
                     token1,
                     usdc1,
-                    pool.fee(),
+                    params.pool,
                     effectiveSlippage
                 );
             }
@@ -193,11 +192,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             amount1 = usdc1;
         }
         
-        // Approve tokens to Position Manager
-        _approveTokenToPermit2(token0, amount0);
-        _approveTokenToPermit2(token1, amount1);
-        _approvePositionManagerViaPermit2(token0, amount0);
-        _approvePositionManagerViaPermit2(token1, amount1);
+        // Approve tokens directly to Position Manager (it doesn't use Permit2)
+        IERC20(token0).approve(address(POSITION_MANAGER), amount0);
+        IERC20(token1).approve(address(POSITION_MANAGER), amount1);
         
         // Mint position
         INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
@@ -223,10 +220,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             if (gauge != address(0)) {
                 POSITION_MANAGER.approve(gauge, tokenId);
                 IGauge(gauge).deposit(tokenId);
-                IGauge(gauge).safeTransferFrom(address(this), msg.sender, tokenId);
+                // NFT is now held by the gauge, user interacts with gauge directly
             } else {
+                // If no gauge found, return position to user
                 POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
             }
+        } else {
+            // If not staking, transfer position NFT to user
+            POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
         }
         
         _returnLeftoverTokens(token0, token1);
@@ -245,32 +246,58 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
         address gauge = _findGaugeForPool(params.pool);
-        bool isStaked = gauge != address(0) && IGauge(gauge).stakedContains(msg.sender, params.tokenId);
         
-        if (isStaked) {
-            aeroRewards = IGauge(gauge).earned(address(POSITION_MANAGER), params.tokenId);
-            IGauge(gauge).safeTransferFrom(msg.sender, address(this), params.tokenId);
+        // Track AERO rewards
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        
+        // Check if position is staked by checking NFT ownership
+        address positionOwner = POSITION_MANAGER.ownerOf(params.tokenId);
+        
+        // Handle staked positions
+        if (gauge != address(0) && positionOwner == gauge) {
+            // Position is staked in gauge - withdraw it
             IGauge(gauge).withdraw(params.tokenId);
-            
-            if (aeroRewards > 0) {
-                IGauge(gauge).getReward(msg.sender);
-            }
+            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         } else {
+            // Position is not staked - transfer from user
             POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
         }
+        
+        // Collect any fees first
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: params.tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
         
         ICLPool pool = ICLPool(params.pool);
         address token0 = pool.token0();
         address token1 = pool.token1();
         
-        (,,,,,, uint128 liquidity) = POSITION_MANAGER.positions(params.tokenId);
+        // Get effective slippage
+        uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
+        
+        // Calculate minimum amounts with slippage
+        (uint256 expectedAmount0, uint256 expectedAmount1) = _calculateExpectedAmounts(
+            params.tokenId,
+            params.pool
+        );
+        
+        uint256 amount0Min = (expectedAmount0 * (10000 - effectiveSlippage)) / 10000;
+        uint256 amount1Min = (expectedAmount1 * (10000 - effectiveSlippage)) / 10000;
+        
+        // Get position info
+        (,,,,,,,uint128 liquidity,,,,) = POSITION_MANAGER.positions(params.tokenId);
         
         INonfungiblePositionManager.DecreaseLiquidityParams memory decreaseParams = 
             INonfungiblePositionManager.DecreaseLiquidityParams({
                 tokenId: params.tokenId,
                 liquidity: liquidity,
-                amount0Min: 0,
-                amount1Min: 0,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 deadline: params.deadline
             });
         
@@ -287,8 +314,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         (amount0, amount1) = POSITION_MANAGER.collect(collectParams);
         POSITION_MANAGER.burn(params.tokenId);
         
-        // Swap tokens back to USDC
-        uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
+        // Swap tokens back to USDC (reuse effectiveSlippage from above)
         
         if (token0 != USDC && amount0 > 0) {
             _approveTokenToPermit2(token0, amount0);
@@ -307,7 +333,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     token0,
                     USDC,
                     amount0,
-                    pool.fee(),
+                    params.pool,
                     effectiveSlippage
                 );
             }
@@ -332,7 +358,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     token1,
                     USDC,
                     amount1,
-                    pool.fee(),
+                    params.pool,
                     effectiveSlippage
                 );
             }
@@ -364,9 +390,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 token0Price = getTokenPriceViaOracle(token0);
         uint256 token1Price = getTokenPriceViaOracle(token1);
         
-        (uint160 sqrtPriceX96,,) = pool.slot0();
+        (uint160 sqrtPriceX96,,,,,) = pool.slot0();
         
-        uint256 priceRatio = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96) * token1Price) / (Q96 * Q96 * token0Price);
+        // Price ratio calculation removed - was unused
         
         uint160 sqrtRatioAX96 = getSqrtRatioAtTick(tickLower);
         uint160 sqrtRatioBX96 = getSqrtRatioAtTick(tickUpper);
@@ -405,20 +431,17 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
     
     function _approveUniversalRouterViaPermit2(address token, uint256 amount) internal {
+        // First ensure token is approved to Permit2
+        if (IERC20(token).allowance(address(this), address(PERMIT2)) < amount) {
+            IERC20(token).approve(address(PERMIT2), type(uint256).max);
+        }
+        
+        // Then approve Universal Router via Permit2 with max amounts
         PERMIT2.approve(
             token,
             address(UNIVERSAL_ROUTER),
-            uint160(amount),
-            uint48(block.timestamp + 3600)
-        );
-    }
-    
-    function _approvePositionManagerViaPermit2(address token, uint256 amount) internal {
-        PERMIT2.approve(
-            token,
-            address(POSITION_MANAGER),
-            uint160(amount),
-            uint48(block.timestamp + 3600)
+            type(uint160).max,
+            uint48(block.timestamp + 30 days)
         );
     }
     
@@ -426,25 +449,50 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        uint24 fee,
+        address pool,
         uint256 slippageBps
     ) internal returns (uint256 amountOut) {
-        bytes memory path = abi.encodePacked(tokenIn, fee, tokenOut);
+        // Calculate expected output using quoter
+        uint256 expectedOut = _getQuote(tokenIn, tokenOut, amountIn, pool);
+        uint256 minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
         
-        IUniversalRouter.V3SwapInput memory swapInput = IUniversalRouter.V3SwapInput({
-            path: path,
-            recipient: address(this),
-            amountIn: amountIn,
-            amountOutMinimum: (amountIn * (10000 - slippageBps)) / 10000
-        });
+        // Ensure we have the tokens
+        require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
-        bytes memory commands = abi.encodePacked(bytes1(0x00));
+        // First, approve Permit2 to spend your contract's tokens
+        if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
+            IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+        }
+        
+        // Then, approve Universal Router on Permit2
+        PERMIT2.approve(
+            tokenIn,
+            address(UNIVERSAL_ROUTER),
+            uint160(amountIn),
+            uint48(block.timestamp + 3600) // expiration
+        );
+        
+        bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = abi.encode(swapInput);
         
-        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
+        // Get tick spacing directly from the pool
+        int24 tickSpacing = ICLPool(pool).tickSpacing();
+        bytes memory tickSpacingBytes = abi.encodePacked(uint24(uint256(int256(tickSpacing))));
         
-        amountOut = IERC20(tokenOut).balanceOf(address(this));
+        inputs[0] = abi.encode(
+            address(this),  // recipient
+            amountIn,       // amountIn
+            minAmountOut,   // amountOutMinimum
+            abi.encodePacked(tokenIn, tickSpacingBytes, tokenOut), // path with tick spacing
+            true,           // payerIsUser = true (Universal Router pulls via Permit2)
+            true            // useSlipstreamPools = true for Aerodrome V3 CL pools
+        );
+        
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        UNIVERSAL_ROUTER.execute{value: 0}(commands, inputs);
+        amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        
+        require(amountOut >= minAmountOut, "Insufficient output amount");
     }
     
     function _executeSwapWithRoute(
@@ -454,36 +502,90 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         SwapRoute memory route,
         uint256 slippageBps
     ) internal returns (uint256 amountOut) {
+        require(route.pools.length > 0, "Empty route");
+        require(route.tokens.length == route.pools.length + 1, "Invalid route tokens");
+        require(route.tickSpacings.length == route.pools.length, "Invalid route tick spacings");
+        
+        // Calculate minimum output with slippage
+        uint256 expectedOut = _getQuoteForRoute(tokenIn, tokenOut, amountIn, route);
+        uint256 minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
+        
+        // Single hop swap
+        if (route.pools.length == 1) {
+            return _swapExactInputDirect(
+                route.tokens[0],
+                route.tokens[1],
+                amountIn,
+                route.pools[0],
+                slippageBps
+            );
+        }
+        
+        // Multi-hop swap
         bytes memory path = _encodeMultihopPath(route);
         
-        IUniversalRouter.V3SwapInput memory swapInput = IUniversalRouter.V3SwapInput({
-            path: path,
-            recipient: address(this),
-            amountIn: amountIn,
-            amountOutMinimum: (amountIn * (10000 - slippageBps)) / 10000
-        });
+        // Ensure we have the tokens
+        require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
-        bytes memory commands = abi.encodePacked(bytes1(0x00));
+        // First, approve Permit2 to spend your contract's tokens
+        if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
+            IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+        }
+        
+        // Then, approve Universal Router on Permit2
+        PERMIT2.approve(
+            tokenIn,
+            address(UNIVERSAL_ROUTER),
+            uint160(amountIn),
+            uint48(block.timestamp + 3600)
+        );
+        
+        bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
         bytes[] memory inputs = new bytes[](1);
-        inputs[0] = abi.encode(swapInput);
         
-        UNIVERSAL_ROUTER.execute(commands, inputs, block.timestamp + 300);
+        inputs[0] = abi.encode(
+            address(this),  // recipient
+            amountIn,       // amountIn
+            minAmountOut,   // amountOutMinimum
+            path,           // encoded path
+            true,           // payerIsUser = true (Universal Router pulls via Permit2)
+            true            // useSlipstreamPools = true for Aerodrome V3
+        );
         
-        amountOut = IERC20(tokenOut).balanceOf(address(this));
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        UNIVERSAL_ROUTER.execute{value: 0}(commands, inputs);
+        amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        
+        require(amountOut >= minAmountOut, "Insufficient output amount");
     }
     
     function _encodeMultihopPath(SwapRoute memory route) internal pure returns (bytes memory) {
-        require(route.pools.length > 0, "Empty route");
-        require(route.tokens.length == route.pools.length + 1, "Invalid route");
-        
         bytes memory path = abi.encodePacked(route.tokens[0]);
         
         for (uint256 i = 0; i < route.pools.length; i++) {
-            ICLPool pool = ICLPool(route.pools[i]);
-            path = abi.encodePacked(path, pool.fee(), route.tokens[i + 1]);
+            bytes memory tickSpacingBytes = abi.encodePacked(uint24(uint256(int256(route.tickSpacings[i]))));
+            path = abi.encodePacked(path, tickSpacingBytes, route.tokens[i + 1]);
         }
         
         return path;
+    }
+    
+    function _calculateExpectedAmounts(
+        uint256 tokenId,
+        address pool
+    ) internal view returns (uint256 amount0, uint256 amount1) {
+        (,,,,,int24 tickLower, int24 tickUpper, uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
+        
+        // Get current pool state
+        (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+        
+        // Use SugarHelper to calculate amounts
+        (amount0, amount1) = SUGAR_HELPER.getAmountsForLiquidity(
+            sqrtPriceX96,
+            getSqrtRatioAtTick(tickLower),
+            getSqrtRatioAtTick(tickUpper),
+            liquidity
+        );
     }
     
     function _returnLeftoverTokens(address token0, address token1) internal {
@@ -556,5 +658,61 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     function recoverToken(address token, uint256 amount) external {
         require(msg.sender == address(walletRegistry), "Only registry");
         IERC20(token).transfer(msg.sender, amount);
+    }
+    
+    function _getQuote(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        address pool
+    ) internal returns (uint256 amountOut) {
+        try QUOTER.quoteExactInputSingle(
+            IMixedQuoter.QuoteExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                amountIn: amountIn,
+                tickSpacing: ICLPool(pool).tickSpacing(),
+                sqrtPriceLimitX96: 0
+            })
+        ) returns (uint256 out, uint160, uint32, uint256) {
+            amountOut = out;
+        } catch {
+            // Fallback: estimate based on current pool price
+            (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
+            uint256 price = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 192;
+            
+            // Rough estimate - swap will likely get less due to price impact
+            if (tokenIn < tokenOut) {
+                // token0 -> token1
+                amountOut = (amountIn * price * 95) / 100; // Apply 5% buffer
+            } else {
+                // token1 -> token0  
+                amountOut = (amountIn * 95) / (price * 100); // Apply 5% buffer
+            }
+        }
+    }
+    
+    function _getQuoteForRoute(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        SwapRoute memory route
+    ) internal returns (uint256 amountOut) {
+        // For single hop, use direct quote
+        if (route.pools.length == 1) {
+            return _getQuote(tokenIn, tokenOut, amountIn, route.pools[0]);
+        }
+        
+        // For multi-hop, estimate conservatively
+        // This is a simplified approach - ideally would simulate the full path
+        amountOut = amountIn;
+        for (uint256 i = 0; i < route.pools.length; i++) {
+            amountOut = _getQuote(
+                route.tokens[i],
+                route.tokens[i + 1],
+                amountOut,
+                route.pools[i]
+            );
+        }
     }
 }

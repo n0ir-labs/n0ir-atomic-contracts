@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-abstract contract AtomicBase {
+abstract contract AtomicBaseFixed {
     error DeadlineExpired(uint256 deadline, uint256 currentTime);
     error InsufficientOutput(uint256 expected, uint256 actual);
     error InvalidPool(address pool);
@@ -76,33 +76,72 @@ abstract contract AtomicBase {
         return (expectedOutput * (SLIPPAGE_DENOMINATOR - slippageBps)) / SLIPPAGE_DENOMINATOR;
     }
     
+    /**
+     * @dev Fixed version of _safeTransferFrom that properly handles USDC on Base
+     * Uses abi.encodeWithSelector for more reliable encoding
+     */
     function _safeTransferFrom(
         address token,
         address from,
         address to,
         uint256 amount
     ) internal {
-        // Use selector instead of signature for proper encoding
+        // Use the exact selector for transferFrom
         bytes4 selector = bytes4(keccak256("transferFrom(address,address,uint256)"));
+        
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(selector, from, to, amount)
         );
         
-        // First check if call succeeded
-        if (!success) {
-            // If call failed, try to decode revert reason
-            if (data.length > 0) {
-                // Bubble up the revert reason
-                assembly {
-                    revert(add(32, data), mload(data))
+        // Check success first
+        require(success, "Transfer call failed");
+        
+        // Then check return value - USDC returns true on success
+        if (data.length > 0) {
+            // Decode and check the boolean return value
+            bool result = abi.decode(data, (bool));
+            require(result, "Transfer returned false");
+        }
+        // If data.length == 0, some tokens don't return a value but the call succeeded
+    }
+    
+    /**
+     * @dev Alternative implementation using assembly for maximum compatibility
+     */
+    function _safeTransferFromAssembly(
+        address token,
+        address from,
+        address to,
+        uint256 amount
+    ) internal {
+        assembly {
+            // Allocate memory for the call data
+            let data := mload(0x40)
+            
+            // Store the function selector for transferFrom(address,address,uint256)
+            mstore(data, 0x23b872dd00000000000000000000000000000000000000000000000000000000)
+            mstore(add(data, 0x04), from)
+            mstore(add(data, 0x24), to)
+            mstore(add(data, 0x44), amount)
+            
+            // Make the call
+            let success := call(gas(), token, 0, data, 0x64, 0, 0x20)
+            
+            // Check if the call was successful
+            if iszero(success) {
+                revert(0, 0)
+            }
+            
+            // Check return value if any
+            if returndatasize() {
+                // Copy the return data
+                returndatacopy(0, 0, returndatasize())
+                
+                // Check if transferFrom returned true
+                if iszero(mload(0)) {
+                    revert(0, 0)
                 }
             }
-            revert("Transfer failed");
-        }
-        
-        // Then check return value if present
-        if (data.length > 0) {
-            require(abi.decode(data, (bool)), "Transfer returned false");
         }
     }
     
@@ -112,21 +151,16 @@ abstract contract AtomicBase {
         uint256 amount
     ) internal {
         bytes4 selector = bytes4(keccak256("transfer(address,uint256)"));
+        
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(selector, to, amount)
         );
         
-        if (!success) {
-            if (data.length > 0) {
-                assembly {
-                    revert(add(32, data), mload(data))
-                }
-            }
-            revert("Transfer failed");
-        }
+        require(success, "Transfer call failed");
         
         if (data.length > 0) {
-            require(abi.decode(data, (bool)), "Transfer returned false");
+            bool result = abi.decode(data, (bool));
+            require(result, "Transfer returned false");
         }
     }
     
@@ -136,21 +170,16 @@ abstract contract AtomicBase {
         uint256 amount
     ) internal {
         bytes4 selector = bytes4(keccak256("approve(address,uint256)"));
+        
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(selector, spender, amount)
         );
         
-        if (!success) {
-            if (data.length > 0) {
-                assembly {
-                    revert(add(32, data), mload(data))
-                }
-            }
-            revert("Approve failed");
-        }
+        require(success, "Approve call failed");
         
         if (data.length > 0) {
-            require(abi.decode(data, (bool)), "Approve returned false");
+            bool result = abi.decode(data, (bool));
+            require(result, "Approve returned false");
         }
     }
 }
