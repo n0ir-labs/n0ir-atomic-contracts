@@ -27,6 +27,7 @@ import "@interfaces/ILpSugar.sol";
 import "@interfaces/IVoter.sol";
 import "@interfaces/IOffchainOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title N0irProtocol
@@ -35,7 +36,7 @@ import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
  * @dev Executes complex DeFi strategies with military-grade precision and efficiency
  *      Integrates with Aerodrome V3 for concentrated liquidity management
  */
-contract N0irProtocol is AtomicBase, IERC721Receiver {
+contract N0irProtocol is AtomicBase, IERC721Receiver, Pausable {
     /// @notice CDP Wallet Registry for access control
     CDPWalletRegistry public immutable walletRegistry;
     
@@ -188,6 +189,7 @@ contract N0irProtocol is AtomicBase, IERC721Receiver {
     function swapMintAndStake(SwapMintParams calldata params)
         external
         nonReentrant
+        whenNotPaused
         deadlineCheck(params.deadline)
         validAmount(params.usdcAmount)
         onlyAuthorized(msg.sender)
@@ -439,6 +441,7 @@ contract N0irProtocol is AtomicBase, IERC721Receiver {
     function fullExit(FullExitParams calldata params)
         external
         nonReentrant
+        whenNotPaused
         deadlineCheck(params.deadline)
         onlyAuthorized(msg.sender)
         returns (uint256 usdcOut, uint256 aeroRewards)
@@ -790,6 +793,24 @@ contract N0irProtocol is AtomicBase, IERC721Receiver {
     function recoverToken(address token, uint256 amount) external {
         require(msg.sender == address(walletRegistry), "Only registry owner");
         _safeTransfer(token, msg.sender, amount);
+    }
+
+    /**
+     * @notice Pause all critical protocol operations
+     * @dev Can only be called by the registry owner for emergency situations
+     */
+    function pause() external {
+        require(msg.sender == address(walletRegistry), "Only registry owner");
+        _pause();
+    }
+
+    /**
+     * @notice Unpause protocol operations after emergency resolution
+     * @dev Can only be called by the registry owner
+     */
+    function unpause() external {
+        require(msg.sender == address(walletRegistry), "Only registry owner");
+        _unpause();
     }
 }
 
