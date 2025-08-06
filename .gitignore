@@ -29,3 +29,7 @@ coverage.json
 # Local stuff
 CLAUDE.md
 specs
+anvil.log
+
+# Deployment artifacts
+deployments/

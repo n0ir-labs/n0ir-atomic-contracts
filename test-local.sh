@@ -48,17 +48,26 @@ sleep 2
 
 # Start Anvil fork in the background
 echo -e "${GREEN}Starting Anvil fork of Base mainnet...${NC}"
-anvil \
-    --fork-url $FORK_URL \
-    --fork-block-number $FORK_BLOCK \
-    --port $PORT \
-    --accounts 10 \
-    --balance 10000 \
-    --chain-id 8453 \
-    --block-time 2 \
-    --no-mining \
-    --steps-tracing \
-    > anvil.log 2>&1 &
+if [ "$FORK_BLOCK" = "latest" ]; then
+    anvil \
+        --fork-url $FORK_URL \
+        --port $PORT \
+        --accounts 10 \
+        --balance 10000 \
+        --chain-id 8453 \
+        --steps-tracing \
+        > anvil.log 2>&1 &
+else
+    anvil \
+        --fork-url $FORK_URL \
+        --fork-block-number $FORK_BLOCK \
+        --port $PORT \
+        --accounts 10 \
+        --balance 10000 \
+        --chain-id 8453 \
+        --steps-tracing \
+        > anvil.log 2>&1 &
+fi
 
 ANVIL_PID=$!
 echo "Anvil PID: $ANVIL_PID"
