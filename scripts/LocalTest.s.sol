@@ -83,16 +83,33 @@ contract LocalTest is Script {
         
         vm.stopBroadcast();
         
-        // Fund each test wallet with 10,000 USDC using deal
+        // Fund each test wallet with 10,000 USDC
         uint256 fundAmount = 10_000 * 1e6; // 10,000 USDC (6 decimals)
         
-        // Use deal to set USDC balance directly
-        deal(USDC, TEST_WALLET_1, fundAmount);
-        deal(USDC, TEST_WALLET_2, fundAmount);
-        deal(USDC, TEST_WALLET_3, fundAmount);
+        // Find a real USDC whale on Base
+        address usdcWhale = 0x20FE51A9229EEf2cF8Ad9E89d91CAb9312cF3b7A; // Large USDC holder
         
-        console.log("  Funded each wallet with 10,000 USDC");
+        // Impersonate the whale and transfer USDC
+        vm.startPrank(usdcWhale);
         
+        // Check whale balance first
+        uint256 whaleBalance = IERC20(USDC).balanceOf(usdcWhale);
+        console.log("  Whale USDC balance:", whaleBalance / 1e6);
+        
+        if (whaleBalance >= fundAmount * 3) {
+            IERC20(USDC).transfer(TEST_WALLET_1, fundAmount);
+            IERC20(USDC).transfer(TEST_WALLET_2, fundAmount);
+            IERC20(USDC).transfer(TEST_WALLET_3, fundAmount);
+            console.log("  Funded each wallet with 10,000 USDC");
+        } else {
+            console.log("  Warning: Whale doesn't have enough USDC, using storage manipulation");
+            // Fallback: directly manipulate storage (USDC uses slot 9 for balances)
+            vm.store(USDC, keccak256(abi.encode(TEST_WALLET_1, uint256(9))), bytes32(fundAmount));
+            vm.store(USDC, keccak256(abi.encode(TEST_WALLET_2, uint256(9))), bytes32(fundAmount));
+            vm.store(USDC, keccak256(abi.encode(TEST_WALLET_3, uint256(9))), bytes32(fundAmount));
+        }
+        
+        vm.stopPrank();
         vm.startBroadcast(TEST_WALLET_1);
         
         // Check balances

@@ -92,7 +92,7 @@ echo ""
 echo -e "${GREEN}Deploying n0ir Protocol to local fork...${NC}"
 forge script scripts/LocalTest.s.sol:LocalTest \
     --rpc-url http://localhost:$PORT \
-    --broadcast \
+    --unlocked \
     -vvv
 
 echo ""
