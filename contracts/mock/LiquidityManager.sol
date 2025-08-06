@@ -24,6 +24,9 @@ import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 contract LiquidityManager is AtomicBase, IERC721Receiver {
     WalletRegistry public immutable walletRegistry;
     
+    // Ownership tracking for staked positions
+    mapping(uint256 => address) public stakedPositionOwners;
+    
     // Core protocol addresses (matching N0irProtocol)
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
     IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
@@ -218,9 +221,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (params.stake) {
             address gauge = _findGaugeForPool(params.pool);
             if (gauge != address(0)) {
+                // Track ownership before staking
+                stakedPositionOwners[tokenId] = msg.sender;
+                
                 POSITION_MANAGER.approve(gauge, tokenId);
                 IGauge(gauge).deposit(tokenId);
-                // NFT is now held by the gauge, user interacts with gauge directly
+                // NFT is now held by the gauge, tracked ownership allows user to claim later
             } else {
                 // If no gauge found, return position to user
                 POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
@@ -255,9 +261,18 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         
         // Handle staked positions
         if (gauge != address(0) && positionOwner == gauge) {
-            // Position is staked in gauge - withdraw it
+            // Position is staked in gauge - verify ownership
+            require(
+                stakedPositionOwners[params.tokenId] == msg.sender,
+                "Not the owner of this staked position"
+            );
+            
+            // Withdraw from gauge
             IGauge(gauge).withdraw(params.tokenId);
             aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+            
+            // Clear ownership tracking
+            delete stakedPositionOwners[params.tokenId];
         } else {
             // Position is not staked - transfer from user
             POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
@@ -387,23 +402,70 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         int24 tickUpper,
         ICLPool pool
     ) public view returns (uint256 usdc0, uint256 usdc1) {
-        uint256 token0Price = getTokenPriceViaOracle(token0);
-        uint256 token1Price = getTokenPriceViaOracle(token1);
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = pool.slot0();
         
-        (uint160 sqrtPriceX96,,,,,) = pool.slot0();
+        // Check if position is in range
+        if (currentTick < tickLower) {
+            // Price below range: need 100% token0
+            return (totalUSDC, 0);
+        } else if (currentTick >= tickUpper) {
+            // Price above range: need 100% token1
+            return (0, totalUSDC);
+        }
         
-        // Price ratio calculation removed - was unused
+        // In-range position: calculate optimal ratio using tick position
+        // Get USD prices from oracle
+        uint256 token0PriceInUSDC = getTokenPriceViaOracle(token0);
+        uint256 token1PriceInUSDC = getTokenPriceViaOracle(token1);
         
-        uint160 sqrtRatioAX96 = getSqrtRatioAtTick(tickLower);
-        uint160 sqrtRatioBX96 = getSqrtRatioAtTick(tickUpper);
+        // Calculate allocation based on tick position in range
+        uint256 tickRange = uint256(int256(tickUpper - tickLower));
+        uint256 tickPosition = uint256(int256(currentTick - tickLower));
         
-        uint256 liquidity0 = Q96 * Q96 / (uint256(sqrtRatioBX96) - uint256(sqrtRatioAX96));
-        uint256 liquidity1 = uint256(sqrtRatioBX96) * uint256(sqrtRatioAX96) / Q96;
+        // Prevent division by zero
+        if (tickRange == 0) {
+            // If range is too narrow, split 50/50
+            usdc0 = totalUSDC / 2;
+            usdc1 = totalUSDC - usdc0;
+            return (usdc0, usdc1);
+        }
         
-        uint256 totalValue = (liquidity0 * token0Price / 1e18) + (liquidity1 * token1Price / 1e18);
+        uint256 token1Ratio = (tickPosition * 100) / tickRange;
         
-        usdc0 = (totalUSDC * liquidity0 * token0Price / 1e18) / totalValue;
-        usdc1 = totalUSDC - usdc0;
+        // Initial allocation
+        uint256 initialUsdc1 = (totalUSDC * token1Ratio) / 100;
+        uint256 initialUsdc0 = totalUSDC - initialUsdc1;
+        
+        // Convert USDC amounts to token amounts
+        uint256 token0Decimals = token0 == WETH ? 18 : 6;
+        uint256 token1Decimals = token1 == WETH ? 18 : 6;
+        
+        // Calculate token amounts based on prices
+        uint256 token0Amount = (initialUsdc0 * (10 ** token0Decimals)) / token0PriceInUSDC;
+        
+        // Use SugarHelper to get the corresponding token1 amount needed
+        uint256 token1Needed = SUGAR_HELPER.estimateAmount1(
+            token0Amount,
+            address(pool),
+            sqrtPriceX96,
+            tickLower,
+            tickUpper
+        );
+        
+        // Calculate actual USDC values
+        uint256 usdc0Value = (token0Amount * token0PriceInUSDC) / (10 ** token0Decimals);
+        uint256 usdc1Value = (token1Needed * token1PriceInUSDC) / (10 ** token1Decimals);
+        
+        // Scale to match totalUSDC exactly
+        uint256 totalValue = usdc0Value + usdc1Value;
+        if (totalValue > 0) {
+            usdc0 = (usdc0Value * totalUSDC) / totalValue;
+            usdc1 = totalUSDC - usdc0;
+        } else {
+            // Fallback to initial allocation
+            usdc0 = initialUsdc0;
+            usdc1 = initialUsdc1;
+        }
     }
     
     function getTokenPriceViaOracle(address token) public view returns (uint256 price) {
@@ -452,9 +514,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address pool,
         uint256 slippageBps
     ) internal returns (uint256 amountOut) {
-        // Calculate expected output using quoter
-        uint256 expectedOut = _getQuote(tokenIn, tokenOut, amountIn, pool);
-        uint256 minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
+        // For production: Don't rely on quoter, use conservative minimum
+        // Calculate minAmountOut based on oracle prices with extra buffer
+        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
         
         // Ensure we have the tokens
         require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
@@ -506,9 +568,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         require(route.tokens.length == route.pools.length + 1, "Invalid route tokens");
         require(route.tickSpacings.length == route.pools.length, "Invalid route tick spacings");
         
-        // Calculate minimum output with slippage
-        uint256 expectedOut = _getQuoteForRoute(tokenIn, tokenOut, amountIn, route);
-        uint256 minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
+        // Use oracle-based minimum calculation instead of quoter
+        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
         
         // Single hop swap
         if (route.pools.length == 1) {
@@ -641,7 +702,10 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (absTick & 0x40000 != 0) ratio = (ratio * 0x2216e584f5fa1ea926041bedfe98) >> 128;
         if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
         
-        if (tick > 0) ratio = type(uint256).max / ratio;
+        if (tick > 0) {
+            require(ratio > 0, "Invalid ratio for tick");
+            ratio = type(uint256).max / ratio;
+        }
         
         return uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
     }
@@ -660,59 +724,165 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         IERC20(token).transfer(msg.sender, amount);
     }
     
-    function _getQuote(
+    /**
+     * @notice Emergency function to recover stuck staked positions
+     * @dev Only callable by wallet registry owner for positions without ownership records
+     * @param tokenId The stuck position token ID
+     * @param pool The pool address
+     * @param recipient The address to send recovered funds to
+     */
+    function emergencyRecoverStakedPosition(
+        uint256 tokenId,
+        address pool,
+        address recipient
+    ) external returns (uint256 usdcOut, uint256 aeroRewards) {
+        require(msg.sender == address(walletRegistry), "Only registry");
+        require(stakedPositionOwners[tokenId] == address(0), "Position has owner");
+        
+        address gauge = _findGaugeForPool(pool);
+        require(gauge != address(0), "No gauge found");
+        
+        // Track AERO before withdrawal
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        
+        // Withdraw from gauge
+        IGauge(gauge).withdraw(tokenId);
+        aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        
+        // Get pool info
+        ICLPool clPool = ICLPool(pool);
+        address token0 = clPool.token0();
+        address token1 = clPool.token1();
+        
+        // Get position info
+        (,,,,,,,uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
+        
+        // Collect fees
+        POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        
+        // Remove liquidity
+        (uint256 amount0, uint256 amount1) = POSITION_MANAGER.decreaseLiquidity(
+            INonfungiblePositionManager.DecreaseLiquidityParams({
+                tokenId: tokenId,
+                liquidity: liquidity,
+                amount0Min: 0,  // Emergency recovery, accept any amount
+                amount1Min: 0,
+                deadline: block.timestamp + 300
+            })
+        );
+        
+        // Collect tokens
+        (amount0, amount1) = POSITION_MANAGER.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
+        );
+        
+        // Burn the position
+        POSITION_MANAGER.burn(tokenId);
+        
+        // Swap tokens to USDC if needed
+        if (token0 != USDC && amount0 > 0) {
+            _approveUniversalRouterViaPermit2(token0, amount0);
+            usdcOut += _swapExactInputDirect(token0, USDC, amount0, pool, 500); // 5% slippage for emergency
+        } else if (token0 == USDC) {
+            usdcOut = amount0;
+        }
+        
+        if (token1 != USDC && amount1 > 0) {
+            _approveUniversalRouterViaPermit2(token1, amount1);
+            usdcOut += _swapExactInputDirect(token1, USDC, amount1, pool, 500); // 5% slippage for emergency
+        } else if (token1 == USDC) {
+            usdcOut += amount1;
+        }
+        
+        // Transfer recovered funds
+        if (usdcOut > 0) {
+            IERC20(USDC).transfer(recipient, usdcOut);
+        }
+        if (aeroRewards > 0) {
+            IERC20(AERO).transfer(recipient, aeroRewards);
+        }
+        
+        emit PositionClosed(recipient, tokenId, usdcOut, aeroRewards);
+    }
+    
+    /**
+     * @notice Check if a user owns a staked position
+     * @param tokenId The position NFT token ID
+     * @return owner The owner address (address(0) if not staked through this contract)
+     */
+    function getStakedPositionOwner(uint256 tokenId) external view returns (address owner) {
+        return stakedPositionOwners[tokenId];
+    }
+    
+    /**
+     * @notice Check if a position is staked through this contract
+     * @param tokenId The position NFT token ID
+     * @return isStaked True if the position is staked through this contract
+     */
+    function isPositionStaked(uint256 tokenId) external view returns (bool isStaked) {
+        return stakedPositionOwners[tokenId] != address(0);
+    }
+    
+    function _calculateMinimumOutput(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        address pool
-    ) internal returns (uint256 amountOut) {
-        try QUOTER.quoteExactInputSingle(
-            IMixedQuoter.QuoteExactInputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                amountIn: amountIn,
-                tickSpacing: ICLPool(pool).tickSpacing(),
-                sqrtPriceLimitX96: 0
-            })
-        ) returns (uint256 out, uint160, uint32, uint256) {
-            amountOut = out;
-        } catch {
-            // Fallback: estimate based on current pool price
-            (uint160 sqrtPriceX96,,,,,) = ICLPool(pool).slot0();
-            uint256 price = (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) >> 192;
-            
-            // Rough estimate - swap will likely get less due to price impact
-            if (tokenIn < tokenOut) {
-                // token0 -> token1
-                amountOut = (amountIn * price * 95) / 100; // Apply 5% buffer
-            } else {
-                // token1 -> token0  
-                amountOut = (amountIn * 95) / (price * 100); // Apply 5% buffer
-            }
+        uint256 slippageBps
+    ) internal view returns (uint256 minAmountOut) {
+        // Production approach: Use oracle prices for reliable minimum calculation
+        uint256 tokenInPrice = getTokenPriceViaOracle(tokenIn);
+        uint256 tokenOutPrice = getTokenPriceViaOracle(tokenOut);
+        
+        // Get decimals
+        uint256 tokenInDecimals = tokenIn == WETH ? 18 : 6;
+        uint256 tokenOutDecimals = tokenOut == WETH ? 18 : 6;
+        
+        // Calculate value in USDC terms
+        uint256 valueInUsdc;
+        if (tokenIn == USDC) {
+            valueInUsdc = amountIn;
+        } else {
+            // Convert to USDC value: amount * price / 10^decimals
+            valueInUsdc = (amountIn * tokenInPrice) / (10 ** tokenInDecimals);
+        }
+        
+        // Calculate expected output
+        uint256 expectedOut;
+        if (tokenOut == USDC) {
+            expectedOut = valueInUsdc;
+        } else {
+            // Convert from USDC value: value * 10^decimals / price
+            expectedOut = (valueInUsdc * (10 ** tokenOutDecimals)) / tokenOutPrice;
+        }
+        
+        // Apply slippage PLUS additional safety buffer for production
+        // Using higher tolerance to account for:
+        // 1. Oracle price staleness
+        // 2. AMM price impact
+        // 3. MEV/sandwich protection
+        uint256 totalSlippageBps = slippageBps + 200; // Add 2% safety buffer
+        if (totalSlippageBps > MAX_SLIPPAGE_BPS) {
+            totalSlippageBps = MAX_SLIPPAGE_BPS;
+        }
+        
+        minAmountOut = (expectedOut * (10000 - totalSlippageBps)) / 10000;
+        
+        // Ensure we always have some minimum to avoid complete loss
+        if (minAmountOut == 0) {
+            minAmountOut = 1;
         }
     }
     
-    function _getQuoteForRoute(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        SwapRoute memory route
-    ) internal returns (uint256 amountOut) {
-        // For single hop, use direct quote
-        if (route.pools.length == 1) {
-            return _getQuote(tokenIn, tokenOut, amountIn, route.pools[0]);
-        }
-        
-        // For multi-hop, estimate conservatively
-        // This is a simplified approach - ideally would simulate the full path
-        amountOut = amountIn;
-        for (uint256 i = 0; i < route.pools.length; i++) {
-            amountOut = _getQuote(
-                route.tokens[i],
-                route.tokens[i + 1],
-                amountOut,
-                route.pools[i]
-            );
-        }
-    }
 }
