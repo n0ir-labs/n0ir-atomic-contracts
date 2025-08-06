@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+/*
+ ███╗   ██╗ ██████╗ ██╗██████╗                                                         
+ ████╗  ██║██╔═████╗██║██╔══██╗    ██████╗ ██████╗  ██████╗ ████████╗ ██████╗  ██████╗ ██╗     
+ ██╔██╗ ██║██║██╔██║██║██████╔╝    ██╔══██╗██╔══██╗██╔═══██╗╚══██╔══╝██╔═══██╗██╔════╝██║     
+ ██║╚██╗██║████╔╝██║██║██╔══██╗    ██████╔╝██████╔╝██║   ██║   ██║   ██║   ██║██║     ██║     
+ ██║ ╚████║╚██████╔╝██║██║  ██║    ██╔═══╝ ██╔══██╗╚██████╔╝   ██║   ╚██████╔╝╚██████╗███████╗
+ ╚═╝  ╚═══╝ ╚═════╝ ╚═╝╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝  ╚═════╝╚══════╝   
+                                                                                  
+ Atomic DeFi Operations | Executed with Precision
+*/
+
 import "./AtomicBase.sol";
 import "./CDPWalletRegistry.sol";
 import "@interfaces/IUniversalRouter.sol";
@@ -18,16 +29,17 @@ import "@interfaces/IOffchainOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /**
- * @title AerodromeAtomicOperations
- * @author N0IR
- * @notice Atomic operations with oracle integration for accurate pricing
- * @dev Uses 1inch Offchain Oracle for USD price discovery
+ * @title N0irProtocol
+ * @author n0ir Protocol
+ * @notice Precision DeFi automation protocol for atomic liquidity operations
+ * @dev Executes complex DeFi strategies with military-grade precision and efficiency
+ *      Integrates with Aerodrome V3 for concentrated liquidity management
  */
-contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
+contract N0irProtocol is AtomicBase, IERC721Receiver {
     /// @notice CDP Wallet Registry for access control
     CDPWalletRegistry public immutable walletRegistry;
     
-    /// @notice Aerodrome Universal Router for token swaps
+    /// @notice Universal Router integration for precision swaps
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
     /// @notice Permit2 contract for token approvals
     IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
@@ -58,13 +70,13 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     uint256 private constant Q96 = 2**96;
     
     /**
-     * @notice Emitted when a new position is opened
-     * @param user The user who opened the position
+     * @notice Emitted when n0ir Protocol opens a new strategic position
+     * @param user The operator initiating the position
      * @param tokenId The ID of the minted position NFT
-     * @param pool The pool address
-     * @param usdcIn The amount of USDC used
-     * @param liquidity The amount of liquidity minted
-     * @param staked Whether the position was staked
+     * @param pool The target liquidity pool
+     * @param usdcIn The USDC capital deployed
+     * @param liquidity The liquidity units created
+     * @param staked Whether position was auto-staked for rewards
      */
     event PositionOpened(
         address indexed user,
@@ -76,11 +88,11 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
     );
     
     /**
-     * @notice Emitted when a position is closed
-     * @param user The user who closed the position
-     * @param tokenId The ID of the closed position
-     * @param usdcOut The amount of USDC received
-     * @param aeroRewards The amount of AERO rewards collected
+     * @notice Emitted when n0ir Protocol executes position exit
+     * @param user The operator executing the exit
+     * @param tokenId The ID of the exited position
+     * @param usdcOut The USDC capital recovered
+     * @param aeroRewards The AERO rewards harvested
      */
     event PositionClosed(
         address indexed user,

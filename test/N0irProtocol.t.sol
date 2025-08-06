@@ -2,15 +2,15 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../contracts/AerodromeAtomicOperations.sol";
+import "../contracts/N0irProtocol.sol";
 import "../contracts/CDPWalletRegistry.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/ICLPool.sol";
 import "@interfaces/INonfungiblePositionManager.sol";
 import "@interfaces/IVoter.sol";
 
-contract AerodromeAtomicOperationsTest is Test {
-    AerodromeAtomicOperations public atomicOps;
+contract N0irProtocolTest is Test {
+    N0irProtocol public atomicOps;
     CDPWalletRegistry public registry;
     
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -34,7 +34,7 @@ contract AerodromeAtomicOperationsTest is Test {
         
         // Deploy contracts
         registry = new CDPWalletRegistry();
-        atomicOps = new AerodromeAtomicOperations(address(registry));
+        atomicOps = new N0irProtocol(address(registry));
         
         // Setup user with USDC
         deal(USDC, user, 1000e6); // 1000 USDC
@@ -103,7 +103,7 @@ contract AerodromeAtomicOperationsTest is Test {
         int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
-        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+        N0irProtocol.SwapMintParams memory params = N0irProtocol.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -111,12 +111,12 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 100e6, // 100 USDC
             slippageBps: 100, // 1% slippage
             stake: false, // Don't stake for this test
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
@@ -154,7 +154,7 @@ contract AerodromeAtomicOperationsTest is Test {
         int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
-        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+        N0irProtocol.SwapMintParams memory params = N0irProtocol.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -162,12 +162,12 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 100e6, // 100 USDC
             slippageBps: 100, // 1% slippage
             stake: true, // ENABLE STAKING
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
@@ -221,7 +221,7 @@ contract AerodromeAtomicOperationsTest is Test {
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
         // Mint and stake position
-        AerodromeAtomicOperations.SwapMintParams memory mintParams = AerodromeAtomicOperations.SwapMintParams({
+        N0irProtocol.SwapMintParams memory mintParams = N0irProtocol.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -229,12 +229,12 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 100e6,
             slippageBps: 100,
             stake: true, // STAKE THE POSITION
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
@@ -252,18 +252,18 @@ contract AerodromeAtomicOperationsTest is Test {
         }
         
         // Now exit the staked position
-        AerodromeAtomicOperations.FullExitParams memory exitParams = AerodromeAtomicOperations.FullExitParams({
+        N0irProtocol.FullExitParams memory exitParams = N0irProtocol.FullExitParams({
             tokenId: tokenId,
             pool: WETH_USDC_POOL,
             deadline: block.timestamp + 3600,
             minUsdcOut: 90e6, // Accept 10% slippage for test
             slippageBps: 200, // 2% slippage
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
@@ -390,7 +390,7 @@ contract AerodromeAtomicOperationsTest is Test {
             token1TickSpacings[0] = usdcCbbtcTickSpacing;
         }
         
-        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+        N0irProtocol.SwapMintParams memory params = N0irProtocol.SwapMintParams({
             pool: CBBTC_LBTC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -398,12 +398,12 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 100e6, // 100 USDC
             slippageBps: 300, // 3% slippage for BTC pairs
             stake: false, // Don't stake for this test
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: token0Pools,
                 tokens: token0Tokens,
                 tickSpacings: token0TickSpacings
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: token1Pools,
                 tokens: token1Tokens,
                 tickSpacings: token1TickSpacings
@@ -457,7 +457,7 @@ contract AerodromeAtomicOperationsTest is Test {
         int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
         int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
         
-        AerodromeAtomicOperations.SwapMintParams memory mintParams = AerodromeAtomicOperations.SwapMintParams({
+        N0irProtocol.SwapMintParams memory mintParams = N0irProtocol.SwapMintParams({
             pool: WETH_USDC_POOL,
             tickLower: tickLower,
             tickUpper: tickUpper,
@@ -465,12 +465,12 @@ contract AerodromeAtomicOperationsTest is Test {
             usdcAmount: 100e6,
             slippageBps: 100,
             stake: false,
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
@@ -483,18 +483,18 @@ contract AerodromeAtomicOperationsTest is Test {
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(atomicOps), tokenId);
         
         // Now exit the position
-        AerodromeAtomicOperations.FullExitParams memory exitParams = AerodromeAtomicOperations.FullExitParams({
+        N0irProtocol.FullExitParams memory exitParams = N0irProtocol.FullExitParams({
             tokenId: tokenId,
             pool: WETH_USDC_POOL,
             deadline: block.timestamp + 3600,
             minUsdcOut: 90e6, // Accept 10% slippage for test
             slippageBps: 200, // 2% slippage
-            token0Route: AerodromeAtomicOperations.SwapRoute({
+            token0Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
             }),
-            token1Route: AerodromeAtomicOperations.SwapRoute({
+            token1Route: N0irProtocol.SwapRoute({
                 pools: new address[](0),
                 tokens: new address[](0),
                 tickSpacings: new int24[](0)
