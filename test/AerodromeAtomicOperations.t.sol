@@ -18,6 +18,12 @@ contract AerodromeAtomicOperationsTest is Test {
     address constant WETH_USDC_POOL = 0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59;
     address constant POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
     
+    // cbBTC/LBTC pool and tokens
+    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;  // cbBTC
+    address constant LBTC = 0xecAc9C5F704e954931349Da37F60E39f515c11c1;   // LBTC (correct address from pool)
+    address constant USDC_CBBTC_POOL = 0x4e962BB3889Bf030368F56810A9c96B83CB3E778;  // USDC/cbBTC pool
+    address constant CBBTC_LBTC_POOL = 0xA44D3Bb767d953711EA4Bce8C0F01f4d7D299aF6;  // cbBTC/LBTC pool
+    
     address user = address(0x1234);
     uint256 baseMainnetFork;
     
@@ -285,6 +291,157 @@ contract AerodromeAtomicOperationsTest is Test {
         if (aeroRewards > 0) {
             assertEq(aeroAfter - aeroBefore, aeroRewards);
         }
+        
+        vm.stopPrank();
+    }
+    
+    function testCbBTC_LBTC_PoolWithSmartRouting() public {
+        vm.startPrank(user);
+        
+        // Get pool info
+        ICLPool pool = ICLPool(CBBTC_LBTC_POOL);
+        (,int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        
+        console.log("cbBTC/LBTC Pool:");
+        console.log("Token0:", token0);
+        console.log("Token1:", token1);
+        console.log("Current tick:", currentTick);
+        console.log("Tick spacing:", tickSpacing);
+        
+        // Determine which token is which
+        bool cbbtcIsToken0 = (token0 == CBBTC);
+        console.log("cbBTC is token0:", cbbtcIsToken0);
+        
+        // Create range around current price
+        int24 tickLower = ((currentTick - 500) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 500) / tickSpacing) * tickSpacing;
+        
+        // Get tick spacing for USDC/cbBTC pool
+        ICLPool usdcCbbtcPool = ICLPool(USDC_CBBTC_POOL);
+        int24 usdcCbbtcTickSpacing = usdcCbbtcPool.tickSpacing();
+        console.log("USDC/cbBTC pool tick spacing:", usdcCbbtcTickSpacing);
+        
+        // Build smart routes:
+        // Route 1: USDC -> cbBTC (direct, for cbBTC position)
+        // Route 2: USDC -> cbBTC -> LBTC (multihop, for LBTC position)
+        
+        // Create route arrays
+        address[] memory token0Pools;
+        address[] memory token0Tokens;
+        int24[] memory token0TickSpacings;
+        
+        address[] memory token1Pools;
+        address[] memory token1Tokens;
+        int24[] memory token1TickSpacings;
+        
+        if (cbbtcIsToken0) {
+            // Token0 is cbBTC: USDC -> cbBTC (direct)
+            token0Pools = new address[](1);
+            token0Pools[0] = USDC_CBBTC_POOL;
+            
+            token0Tokens = new address[](2);
+            token0Tokens[0] = USDC;
+            token0Tokens[1] = CBBTC;
+            
+            token0TickSpacings = new int24[](1);
+            token0TickSpacings[0] = usdcCbbtcTickSpacing;
+            
+            // Token1 is LBTC: USDC -> cbBTC -> LBTC (multihop)
+            token1Pools = new address[](2);
+            token1Pools[0] = USDC_CBBTC_POOL;
+            token1Pools[1] = CBBTC_LBTC_POOL;
+            
+            token1Tokens = new address[](3);
+            token1Tokens[0] = USDC;
+            token1Tokens[1] = CBBTC;
+            token1Tokens[2] = LBTC;
+            
+            token1TickSpacings = new int24[](2);
+            token1TickSpacings[0] = usdcCbbtcTickSpacing;
+            token1TickSpacings[1] = tickSpacing;
+        } else {
+            // Token0 is LBTC: USDC -> cbBTC -> LBTC (multihop)
+            token0Pools = new address[](2);
+            token0Pools[0] = USDC_CBBTC_POOL;
+            token0Pools[1] = CBBTC_LBTC_POOL;
+            
+            token0Tokens = new address[](3);
+            token0Tokens[0] = USDC;
+            token0Tokens[1] = CBBTC;
+            token0Tokens[2] = LBTC;
+            
+            token0TickSpacings = new int24[](2);
+            token0TickSpacings[0] = usdcCbbtcTickSpacing;
+            token0TickSpacings[1] = tickSpacing;
+            
+            // Token1 is cbBTC: USDC -> cbBTC (direct)
+            token1Pools = new address[](1);
+            token1Pools[0] = USDC_CBBTC_POOL;
+            
+            token1Tokens = new address[](2);
+            token1Tokens[0] = USDC;
+            token1Tokens[1] = CBBTC;
+            
+            token1TickSpacings = new int24[](1);
+            token1TickSpacings[0] = usdcCbbtcTickSpacing;
+        }
+        
+        AerodromeAtomicOperations.SwapMintParams memory params = AerodromeAtomicOperations.SwapMintParams({
+            pool: CBBTC_LBTC_POOL,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            deadline: block.timestamp + 3600,
+            usdcAmount: 100e6, // 100 USDC
+            slippageBps: 300, // 3% slippage for BTC pairs
+            stake: false, // Don't stake for this test
+            token0Route: AerodromeAtomicOperations.SwapRoute({
+                pools: token0Pools,
+                tokens: token0Tokens,
+                tickSpacings: token0TickSpacings
+            }),
+            token1Route: AerodromeAtomicOperations.SwapRoute({
+                pools: token1Pools,
+                tokens: token1Tokens,
+                tickSpacings: token1TickSpacings
+            })
+        });
+        
+        uint256 usdcBefore = IERC20(USDC).balanceOf(user);
+        
+        console.log("\n=== Executing Smart Routing ===");
+        console.log("Total USDC input: 100 USDC");
+        console.log("Route for token0:", cbbtcIsToken0 ? "USDC -> cbBTC (direct)" : "USDC -> cbBTC -> LBTC (multihop)");
+        console.log("Route for token1:", cbbtcIsToken0 ? "USDC -> cbBTC -> LBTC (multihop)" : "USDC -> cbBTC (direct)");
+        console.log("Total swaps needed: 2 (smart routing through cbBTC)");
+        
+        (uint256 tokenId, uint128 liquidity) = atomicOps.swapMintAndStake(params);
+        
+        uint256 usdcAfter = IERC20(USDC).balanceOf(user);
+        
+        console.log("\n=== Results ===");
+        console.log("Position minted with tokenId:", tokenId);
+        console.log("Liquidity:", liquidity);
+        console.log("USDC spent:", usdcBefore - usdcAfter);
+        
+        // Verify position was created
+        assertGt(tokenId, 0);
+        assertGt(liquidity, 0);
+        
+        // Verify user owns the position (not staked)
+        assertEq(INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId), user);
+        
+        // Get position details
+        (,, address posToken0, address posToken1,,,, uint128 posLiquidity,,,,) = 
+            INonfungiblePositionManager(POSITION_MANAGER).positions(tokenId);
+        
+        console.log("\n=== Position Details ===");
+        console.log("Position token0:", posToken0);
+        console.log("Position token1:", posToken1);
+        console.log("Position liquidity:", posLiquidity);
         
         vm.stopPrank();
     }

@@ -679,9 +679,9 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
             // Add token address (20 bytes)
             path = abi.encodePacked(path, route.tokens[i]);
             
-            // Convert tick spacing to fee and add as 3 bytes
-            uint24 fee = _tickSpacingToFee(route.tickSpacings[i]);
-            path = abi.encodePacked(path, fee);
+            // Aerodrome Universal Router expects tick spacing directly (3 bytes)
+            // NOT the fee - they are separate pool properties
+            path = abi.encodePacked(path, route.tickSpacings[i]);
         }
         
         // Add final token
@@ -690,18 +690,11 @@ contract AerodromeAtomicOperations is AtomicBase, IERC721Receiver {
         return path;
     }
     
-    /**
-     * @notice Converts tick spacing to fee tier for Universal Router
-     * @param tickSpacing The tick spacing of the pool
-     * @return fee The fee tier in basis points
-     */
-    function _tickSpacingToFee(int24 tickSpacing) internal pure returns (uint24) {
-        if (tickSpacing == 1) return 100;     // 0.01%
-        if (tickSpacing == 10) return 500;    // 0.05%
-        if (tickSpacing == 60) return 3000;   // 0.30%
-        if (tickSpacing == 200) return 10000; // 1.00%
-        revert("Unsupported tick spacing");
-    }
+    // Note: Removed _tickSpacingToFee function as Aerodrome's Universal Router
+    // expects tick spacing directly in the path, not fees.
+    // Pools have both fee() and tickSpacing() properties which serve different purposes:
+    // - fee(): The actual swap fee charged by the pool (e.g., 333 = 0.0333%)
+    // - tickSpacing(): The granularity of tick positions (e.g., 1, 10, 50, 100, 200, 2000)
     
     /**
      * @notice Calculates expected amounts from burning a position using SugarHelper
