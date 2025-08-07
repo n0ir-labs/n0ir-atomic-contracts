@@ -480,15 +480,22 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         
         for (uint i = 0; i < connectors.length; i++) {
             try ORACLE.getRate(
-                token, 
-                USDC, 
+                USDC,  // from token (USDC)
+                token, // to token (the token we want price for)
                 connectors[i], 
                 0
             ) returns (uint256 rate, uint256 weight) {
                 if (rate > 0 && weight > 0) {
-                    // Oracle returns rate with 18 decimals
-                    // Convert rate to USDC terms (6 decimals)
-                    price = (rate * 1e6) / 1e18;
+                    // Oracle returns the rate of USDC -> token with 18 decimals
+                    // This tells us how much token we get for 1 USDC
+                    // To get the price of token in USDC, we need to invert this
+                    
+                    // For WETH: if rate = 258926278352007064085601812 (0.000258926... WETH per USDC)
+                    // Then 1 WETH = 1 / 0.000258926... = ~3862 USDC
+                    
+                    // Calculate: price = 1e6 * 1e18 / rate
+                    // This gives us USDC (with 6 decimals) per 1 unit of token
+                    price = (1e6 * 1e18) / rate;
                     return price;
                 }
             } catch {
