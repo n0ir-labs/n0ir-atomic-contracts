@@ -15,6 +15,7 @@ import "@interfaces/IGaugeFactory.sol";
 import "@interfaces/IVoter.sol";
 import "@interfaces/IAerodromeOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import "forge-std/console.sol";
 
 /**
  * @title LiquidityManager
@@ -357,6 +358,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         POSITION_MANAGER.burn(params.tokenId);
         
         // Swap tokens back to USDC (reuse effectiveSlippage from above)
+        console.log("Closing position - token0:", token0, "amount0:", amount0);
+        console.log("Closing position - token1:", token1, "amount1:", amount1);
         
         if (token0 != USDC && amount0 > 0) {
             _approveTokenToPermit2(token0, amount0);
@@ -727,16 +730,25 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Calculate minAmountOut based on oracle prices with extra buffer
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
         
+        console.log("\n_swapExactInputDirect:");
+        console.log("  Pool:", pool);
+        console.log("  TokenIn:", tokenIn);
+        console.log("  TokenOut:", tokenOut);
+        console.log("  AmountIn:", amountIn);
+        console.log("  MinAmountOut:", minAmountOut);
+        
         // Ensure we have the tokens
         require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
         // Get tick spacing to determine which router to use
         int24 tickSpacing = ICLPool(pool).tickSpacing();
+        console.log("  TickSpacing:", uint256(int256(tickSpacing)));
         
         // For pools with tick spacing = 1, use SwapRouter (has correct factory)
         // For other pools, use Universal Router
         if (tickSpacing == 1) {
             // Use SwapRouter for tick spacing = 1 pools
+            console.log("  Using SwapRouter fallback");
             amountOut = _swapViaSwapRouter(tokenIn, tokenOut, amountIn, tickSpacing, minAmountOut);
         } else {
             // Use Universal Router for standard pools
@@ -794,6 +806,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         int24 tickSpacing,
         uint256 minAmountOut
     ) internal returns (uint256 amountOut) {
+        console.log("\n_swapViaSwapRouter:");
+        console.log("  TokenIn:", tokenIn);
+        console.log("  TokenOut:", tokenOut);
+        console.log("  AmountIn:", amountIn);
+        console.log("  MinAmountOut:", minAmountOut);
+        
         // Approve SwapRouter to spend our tokens
         if (IERC20(tokenIn).allowance(address(this), SWAP_ROUTER) < amountIn) {
             IERC20(tokenIn).approve(SWAP_ROUTER, type(uint256).max);
@@ -847,11 +865,19 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         require(route.tokens.length == route.pools.length + 1, "Invalid route tokens");
         require(route.tickSpacings.length == route.pools.length, "Invalid route tick spacings");
         
+        console.log("\n_executeSwapWithRoute:");
+        console.log("  TokenIn:", tokenIn);
+        console.log("  TokenOut:", tokenOut);
+        console.log("  AmountIn:", amountIn);
+        console.log("  Number of hops:", route.pools.length);
+        
         // Use oracle-based minimum calculation instead of quoter
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
+        console.log("  MinAmountOut (oracle-based):", minAmountOut);
         
         // Single hop swap
         if (route.pools.length == 1) {
+            console.log("  Single hop swap");
             return _swapExactInputDirect(
                 route.tokens[0],
                 route.tokens[1],
@@ -861,49 +887,44 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             );
         }
         
-        // Multi-hop swap
-        bytes memory path = _encodeMultihopPath(route);
+        // Multi-hop swap - execute each hop sequentially
+        // Universal Router doesn't support multi-hop natively, so we execute each swap separately
+        console.log("  Multi-hop swap");
+        uint256 currentAmount = amountIn;
+        address currentToken = tokenIn;
         
-        // Ensure we have the tokens
-        require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
-        
-        // Handle approvals based on token type
-        if (tokenIn != USDC) {
-            // For non-USDC tokens, approve Permit2 if needed
-            _approveTokenToPermit2(tokenIn, amountIn);
-            _approveUniversalRouterViaPermit2(tokenIn, amountIn);
-        } else {
-            // For USDC, use existing approval logic
-            if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
-                IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
-            }
+        for (uint256 i = 0; i < route.pools.length; i++) {
+            address nextToken = route.tokens[i + 1];
+            address pool = route.pools[i];
+            int24 tickSpacing = route.tickSpacings[i];
+            
+            console.log("\n  Hop", i + 1, "of", route.pools.length);
+            console.log("    From:", currentToken);
+            console.log("    To:", nextToken);
+            console.log("    Pool:", pool);
+            console.log("    Input amount:", currentAmount);
+            
+            // Calculate slippage for this hop (distribute evenly across hops)
+            uint256 hopSlippage = slippageBps / route.pools.length;
+            
+            // Execute single hop swap using the appropriate router
+            currentAmount = _swapExactInputDirect(
+                currentToken,
+                nextToken,
+                currentAmount,
+                pool,
+                hopSlippage
+            );
+            
+            console.log("    Output amount:", currentAmount);
+            
+            currentToken = nextToken;
         }
         
-        // Then, approve Universal Router on Permit2
-        PERMIT2.approve(
-            tokenIn,
-            address(UNIVERSAL_ROUTER),
-            uint160(amountIn),
-            uint48(block.timestamp + 3600)
-        );
-        
-        bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
-        bytes[] memory inputs = new bytes[](1);
-        
-        inputs[0] = abi.encode(
-            address(this),  // recipient
-            amountIn,       // amountIn
-            minAmountOut,   // amountOutMinimum
-            path,           // encoded path
-            true,           // payerIsUser = true (Universal Router pulls via Permit2)
-            true            // useSlipstreamPools = true for Aerodrome V3
-        );
-        
-        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
-        UNIVERSAL_ROUTER.execute{value: 0}(commands, inputs);
-        amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
-        
-        require(amountOut >= minAmountOut, "Insufficient output amount");
+        amountOut = currentAmount;
+        console.log("\n  Final output:", amountOut);
+        console.log("  Required minimum:", minAmountOut);
+        require(amountOut >= minAmountOut, "Insufficient output from multi-hop");
     }
     
     function _encodeMultihopPath(SwapRoute memory route) internal pure returns (bytes memory) {
@@ -1008,6 +1029,17 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     function recoverToken(address token, uint256 amount) external {
         require(msg.sender == address(walletRegistry), "Only registry");
         IERC20(token).transfer(msg.sender, amount);
+    }
+    
+    function _getTokenDecimals(address token) internal pure returns (uint256) {
+        // Handle known tokens
+        if (token == 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) return 6; // USDC
+        if (token == 0x4200000000000000000000000000000000000006) return 18; // WETH
+        if (token == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf) return 8; // cbBTC
+        if (token == 0xecAc9C5F704e954931349Da37F60E39f515c11c1) return 8; // LBTC
+        
+        // Default to 18 for unknown tokens
+        return 18;
     }
     
     /**
@@ -1135,34 +1167,52 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         require(tokenInPrice > 0, "Invalid tokenIn price");
         require(tokenOutPrice > 0, "Invalid tokenOut price");
         
-        // Get decimals
-        uint256 tokenInDecimals = tokenIn == WETH ? 18 : 6;
-        uint256 tokenOutDecimals = tokenOut == WETH ? 18 : 6;
+        // Get decimals - handle special cases for BTC tokens
+        uint256 tokenInDecimals = _getTokenDecimals(tokenIn);
+        uint256 tokenOutDecimals = _getTokenDecimals(tokenOut);
+        
+        // Debug logging
+        console.log("  _calculateMinimumOutput debug:");
+        console.log("    TokenIn:", tokenIn);
+        console.log("    TokenOut:", tokenOut); 
+        console.log("    AmountIn:", amountIn);
+        console.log("    TokenInPrice:", tokenInPrice);
+        console.log("    TokenOutPrice:", tokenOutPrice);
+        console.log("    TokenInDecimals:", tokenInDecimals);
+        console.log("    TokenOutDecimals:", tokenOutDecimals);
         
         // Calculate value in USDC terms
+        // Oracle prices are in USDC per token with 18 decimals
         uint256 valueInUsdc;
         if (tokenIn == USDC) {
             valueInUsdc = amountIn;
         } else {
-            // Convert to USDC value: amount * price / 10^decimals
-            valueInUsdc = (amountIn * tokenInPrice) / (10 ** tokenInDecimals);
+            // Convert to USDC value: (amount * price) / 10^(tokenDecimals + 18 - usdcDecimals)
+            // price is in 18 decimals, we want result in USDC's 6 decimals
+            valueInUsdc = (amountIn * tokenInPrice) / (10 ** (tokenInDecimals + 18 - 6));
         }
+        
+        console.log("    ValueInUsdc:", valueInUsdc);
         
         // Calculate expected output
         uint256 expectedOut;
         if (tokenOut == USDC) {
             expectedOut = valueInUsdc;
         } else {
-            // Convert from USDC value: value * 10^decimals / price
-            expectedOut = (valueInUsdc * (10 ** tokenOutDecimals)) / tokenOutPrice;
+            // Convert from USDC value to token amount
+            // expectedOut = valueInUsdc * 10^(tokenOutDecimals + 18 - 6) / tokenOutPrice
+            // Simplify to avoid overflow: expectedOut = valueInUsdc * 10^tokenOutDecimals * 10^12 / tokenOutPrice
+            expectedOut = (valueInUsdc * (10 ** (tokenOutDecimals + 18 - 6))) / tokenOutPrice;
         }
+        
+        console.log("    ExpectedOut (before slippage):", expectedOut);
         
         // Apply slippage PLUS additional safety buffer for production
         // Using higher tolerance to account for:
         // 1. Oracle price staleness
         // 2. AMM price impact
         // 3. MEV/sandwich protection
-        uint256 totalSlippageBps = slippageBps + 200; // Add 2% safety buffer
+        uint256 totalSlippageBps = slippageBps + 500; // Add 5% safety buffer for oracle inaccuracy
         if (totalSlippageBps > MAX_SLIPPAGE_BPS) {
             totalSlippageBps = MAX_SLIPPAGE_BPS;
         }
