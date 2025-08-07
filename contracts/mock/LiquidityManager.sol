@@ -64,6 +64,13 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 aeroRewards
     );
     
+    // Route type classification
+    enum RouteType {
+        EMPTY,          // No swap needed (token is USDC)
+        DIRECT,         // Direct swap from USDC to token
+        INTERMEDIATE    // Needs intermediate token (sequential swap)
+    }
+    
     // Structs (matching N0irProtocol)
     struct SwapRoute {
         address[] pools;
@@ -137,64 +144,83 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         
         uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
         
-        // Calculate optimal allocation
-        (uint256 usdc0, uint256 usdc1) = calculateOptimalUSDCAllocation(
-            params.usdcAmount,
+        // Analyze routes to determine if sequential swapping is needed
+        (bool needsSequential, address intermediateToken) = _analyzeRoutes(
+            params.token0Route,
+            params.token1Route,
             token0,
-            token1,
-            params.tickLower,
-            params.tickUpper,
-            pool
+            token1
         );
         
-        // Swap USDC to tokens
         uint256 amount0 = 0;
         uint256 amount1 = 0;
         
-        // Handle token0 swap
-        if (token0 != USDC) {
-            if (params.token0Route.pools.length > 0) {
-                amount0 = _executeSwapWithRoute(
-                    USDC,
-                    token0,
-                    usdc0,
-                    params.token0Route,
-                    effectiveSlippage
-                );
-            } else {
-                amount0 = _swapExactInputDirect(
-                    USDC,
-                    token0,
-                    usdc0,
-                    params.pool,
-                    effectiveSlippage
-                );
-            }
+        if (needsSequential && intermediateToken != address(0)) {
+            // Sequential routing: one token depends on another
+            (amount0, amount1) = _executeSequentialSwaps(
+                params,
+                token0,
+                token1,
+                intermediateToken,
+                effectiveSlippage
+            );
         } else {
-            amount0 = usdc0;
-        }
-        
-        // Handle token1 swap
-        if (token1 != USDC) {
-            if (params.token1Route.pools.length > 0) {
-                amount1 = _executeSwapWithRoute(
-                    USDC,
-                    token1,
-                    usdc1,
-                    params.token1Route,
-                    effectiveSlippage
-                );
+            // Standard routing: independent swaps
+            // Calculate optimal allocation
+            (uint256 usdc0, uint256 usdc1) = calculateOptimalUSDCAllocation(
+                params.usdcAmount,
+                token0,
+                token1,
+                params.tickLower,
+                params.tickUpper,
+                pool
+            );
+            
+            // Handle token0 swap
+            if (token0 != USDC) {
+                if (params.token0Route.pools.length > 0) {
+                    amount0 = _executeSwapWithRoute(
+                        USDC,
+                        token0,
+                        usdc0,
+                        params.token0Route,
+                        effectiveSlippage
+                    );
+                } else {
+                    amount0 = _swapExactInputDirect(
+                        USDC,
+                        token0,
+                        usdc0,
+                        params.pool,
+                        effectiveSlippage
+                    );
+                }
             } else {
-                amount1 = _swapExactInputDirect(
-                    USDC,
-                    token1,
-                    usdc1,
-                    params.pool,
-                    effectiveSlippage
-                );
+                amount0 = usdc0;
             }
-        } else {
-            amount1 = usdc1;
+            
+            // Handle token1 swap
+            if (token1 != USDC) {
+                if (params.token1Route.pools.length > 0) {
+                    amount1 = _executeSwapWithRoute(
+                        USDC,
+                        token1,
+                        usdc1,
+                        params.token1Route,
+                        effectiveSlippage
+                    );
+                } else {
+                    amount1 = _swapExactInputDirect(
+                        USDC,
+                        token1,
+                        usdc1,
+                        params.pool,
+                        effectiveSlippage
+                    );
+                }
+            } else {
+                amount1 = usdc1;
+            }
         }
         
         // Approve tokens directly to Position Manager (it doesn't use Permit2)
@@ -233,10 +259,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                 // If no gauge found, return position to user
                 POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
             }
-        } else {
-            // If not staking, transfer position NFT to user
-            POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
         }
+        // If not staking, position was already minted directly to user (no transfer needed)
         
         _returnLeftoverTokens(token0, token1);
         
@@ -474,6 +498,152 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
     
+    /**
+     * @notice Analyzes routes to determine if sequential swapping is needed
+     * @return needsSequential True if token1 depends on token0
+     * @return intermediateToken The intermediate token to use (address(0) if none)
+     */
+    function _analyzeRoutes(
+        SwapRoute memory token0Route,
+        SwapRoute memory token1Route,
+        address token0,
+        address token1
+    ) internal pure returns (bool needsSequential, address intermediateToken) {
+        // Check if token1 route starts with token0
+        if (token1Route.tokens.length > 0 && token1Route.tokens[0] == token0) {
+            return (true, token0);
+        }
+        
+        // Check if both routes need the same intermediate token
+        if (token0Route.tokens.length > 1 && token1Route.tokens.length > 1) {
+            // If both routes go through the same intermediate token (e.g., both through cbBTC)
+            if (token0Route.tokens[1] == token1Route.tokens[0]) {
+                return (true, token0Route.tokens[1]);
+            }
+        }
+        
+        return (false, address(0));
+    }
+    
+    /**
+     * @notice Executes sequential swaps when token1 depends on token0 or both need same intermediate
+     */
+    function _executeSequentialSwaps(
+        PositionParams memory params,
+        address token0,
+        address token1,
+        address intermediateToken,
+        uint256 slippageBps
+    ) internal returns (uint256 amount0, uint256 amount1) {
+        ICLPool pool = ICLPool(params.pool);
+        
+        // Case 1: token1 route starts with token0 (e.g., cbBTC/LBTC where LBTC needs cbBTC)
+        if (params.token1Route.tokens.length > 0 && params.token1Route.tokens[0] == token0) {
+            // Calculate how much token0 we need in total
+            // First, get the optimal allocation as if we had both tokens
+            (uint256 usdc0Equivalent, uint256 usdc1Equivalent) = calculateOptimalUSDCAllocation(
+                params.usdcAmount,
+                token0,
+                token1,
+                params.tickLower,
+                params.tickUpper,
+                pool
+            );
+            
+            // Calculate how much token0 we need to get token1
+            uint256 token0ForToken1 = 0;
+            if (usdc1Equivalent > 0 && token1 != USDC) {
+                // Estimate token0 amount needed for token1 based on price ratio
+                uint256 token0Price = getTokenPriceViaOracle(token0);
+                uint256 token1Price = getTokenPriceViaOracle(token1);
+                
+                // Amount of token0 needed to get usdc1Equivalent worth of token1
+                // token0Amount = (usdc1Equivalent / token0Price) * 1e18 (adjusting for decimals)
+                uint256 token0Decimals = token0 == WETH ? 18 : (token0 == CBBTC ? 8 : 6);
+                token0ForToken1 = (usdc1Equivalent * (10 ** token0Decimals)) / token0Price;
+            }
+            
+            // Total USDC to swap to token0
+            uint256 totalUsdcForToken0 = params.usdcAmount; // Use all USDC to get token0 first
+            
+            // Swap all USDC to token0
+            uint256 totalToken0;
+            if (params.token0Route.pools.length > 0) {
+                totalToken0 = _executeSwapWithRoute(
+                    USDC,
+                    token0,
+                    totalUsdcForToken0,
+                    params.token0Route,
+                    slippageBps
+                );
+            } else {
+                totalToken0 = _swapExactInputDirect(
+                    USDC,
+                    token0,
+                    totalUsdcForToken0,
+                    params.pool,
+                    slippageBps
+                );
+            }
+            
+            // Now split token0: some for position, some to swap to token1
+            if (token1 != USDC && token0ForToken1 > 0 && token0ForToken1 < totalToken0) {
+                // Swap portion of token0 to token1
+                amount1 = _swapExactInputDirect(
+                    token0,
+                    token1,
+                    token0ForToken1,
+                    params.pool,
+                    slippageBps
+                );
+                amount0 = totalToken0 - token0ForToken1;
+            } else if (token1 == USDC) {
+                // token1 is USDC, no swap needed for it
+                amount0 = totalToken0;
+                amount1 = 0; // Will be handled by leftover USDC
+            } else {
+                // Edge case: use half for each
+                uint256 halfToken0 = totalToken0 / 2;
+                amount1 = _swapExactInputDirect(
+                    token0,
+                    token1,
+                    halfToken0,
+                    params.pool,
+                    slippageBps
+                );
+                amount0 = totalToken0 - halfToken0;
+            }
+        } else {
+            // Case 2: Both tokens need the same intermediate (rare case)
+            // For simplicity, split 50/50 and swap independently
+            uint256 half = params.usdcAmount / 2;
+            
+            if (token0 != USDC) {
+                amount0 = _executeSwapWithRoute(
+                    USDC,
+                    token0,
+                    half,
+                    params.token0Route,
+                    slippageBps
+                );
+            } else {
+                amount0 = half;
+            }
+            
+            if (token1 != USDC) {
+                amount1 = _executeSwapWithRoute(
+                    USDC,
+                    token1,
+                    params.usdcAmount - half,
+                    params.token1Route,
+                    slippageBps
+                );
+            } else {
+                amount1 = params.usdcAmount - half;
+            }
+        }
+    }
+    
     function getTokenPriceViaOracle(address token) public view returns (uint256 price) {
         if (token == USDC) {
             return 1e6;
@@ -559,31 +729,45 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Ensure we have the tokens
         require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
-        // First, approve Permit2 to spend your contract's tokens
-        if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
-            IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+        // Handle approvals based on token type
+        if (tokenIn != USDC) {
+            // For non-USDC tokens, approve Permit2 if needed
+            _approveTokenToPermit2(tokenIn, amountIn);
+            _approveUniversalRouterViaPermit2(tokenIn, amountIn);
+        } else {
+            // For USDC, use existing approval logic
+            if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
+                IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+            }
+            
+            // Then, approve Universal Router on Permit2
+            PERMIT2.approve(
+                tokenIn,
+                address(UNIVERSAL_ROUTER),
+                uint160(amountIn),
+                uint48(block.timestamp + 3600) // expiration
+            );
         }
-        
-        // Then, approve Universal Router on Permit2
-        PERMIT2.approve(
-            tokenIn,
-            address(UNIVERSAL_ROUTER),
-            uint160(amountIn),
-            uint48(block.timestamp + 3600) // expiration
-        );
         
         bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
         bytes[] memory inputs = new bytes[](1);
         
-        // Get tick spacing directly from the pool
+        // For Aerodrome V3, we need tick spacing, not fee
+        // The Universal Router uses tick spacing to compute the pool address
         int24 tickSpacing = ICLPool(pool).tickSpacing();
-        bytes memory tickSpacingBytes = abi.encodePacked(uint24(uint256(int256(tickSpacing))));
+        
+        // Encode path with tick spacing as int24 (3 bytes)
+        bytes memory path = abi.encodePacked(
+            tokenIn,
+            tickSpacing,  // Tick spacing as int24 (3 bytes)
+            tokenOut
+        );
         
         inputs[0] = abi.encode(
             address(this),  // recipient
             amountIn,       // amountIn
             minAmountOut,   // amountOutMinimum
-            abi.encodePacked(tokenIn, tickSpacingBytes, tokenOut), // path with tick spacing
+            path,           // path with tick spacing
             true,           // payerIsUser = true (Universal Router pulls via Permit2)
             true            // useSlipstreamPools = true for Aerodrome V3 CL pools
         );
@@ -626,9 +810,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Ensure we have the tokens
         require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
-        // First, approve Permit2 to spend your contract's tokens
-        if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
-            IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+        // Handle approvals based on token type
+        if (tokenIn != USDC) {
+            // For non-USDC tokens, approve Permit2 if needed
+            _approveTokenToPermit2(tokenIn, amountIn);
+            _approveUniversalRouterViaPermit2(tokenIn, amountIn);
+        } else {
+            // For USDC, use existing approval logic
+            if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
+                IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+            }
         }
         
         // Then, approve Universal Router on Permit2
