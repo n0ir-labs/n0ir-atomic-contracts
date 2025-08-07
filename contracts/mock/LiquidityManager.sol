@@ -13,7 +13,7 @@ import "@interfaces/ISugarHelper.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/IGaugeFactory.sol";
 import "@interfaces/IVoter.sol";
-import "@interfaces/IOffchainOracle.sol";
+import "@interfaces/IAerodromeOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /**
@@ -27,18 +27,20 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     // Ownership tracking for staked positions
     mapping(uint256 => address) public stakedPositionOwners;
     
-    // Core protocol addresses (matching N0irProtocol)
+    // Core protocol addresses
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
     IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x0A5aA5D3a4d28014f967Bf0f29EAA3FF9807D5c6);
     ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
-    IOffchainOracle public constant ORACLE = IOffchainOracle(0x288a124CB87D7c95656Ad7512B7Da733Bb60A432);
+    IAerodromeOracle public constant ORACLE = IAerodromeOracle(0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2);
     address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
     address public constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
     address public constant WETH = 0x4200000000000000000000000000000000000006;
+    address public constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address constant NONE_CONNECTOR = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
     
     uint256 private constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
     uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10%
@@ -473,17 +475,29 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             return 1e6;
         }
         
-        try ORACLE.getRate(token, USDC, false) returns (uint256 rate) {
-            price = rate;
-        } catch {
-            if (token == WETH) {
-                price = 3595e6;
-            } else if (token == AERO) {
-                price = 1.2e6;
-            } else {
-                price = 1e6;
+        // Try different connectors in order: NONE, WETH, USDC, cbBTC
+        address[4] memory connectors = [NONE_CONNECTOR, WETH, USDC, CBBTC];
+        
+        for (uint i = 0; i < connectors.length; i++) {
+            try ORACLE.getRate(
+                token, 
+                USDC, 
+                connectors[i], 
+                0
+            ) returns (uint256 rate, uint256 weight) {
+                if (rate > 0 && weight > 0) {
+                    // Oracle returns rate with 18 decimals
+                    // Convert rate to USDC terms (6 decimals)
+                    price = (rate * 1e6) / 1e18;
+                    return price;
+                }
+            } catch {
+                continue;
             }
         }
+        
+        // Revert if oracle fails for all connectors
+        revert("Oracle price unavailable");
     }
     
     function _approveTokenToPermit2(address token, uint256 amount) internal {
