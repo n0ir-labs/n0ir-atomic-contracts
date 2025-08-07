@@ -54,7 +54,7 @@ contract SequentialRoutingTest is Test {
             tickUpper: ((currentTick + 500) / tickSpacing) * tickSpacing,
             deadline: block.timestamp + 300,
             usdcAmount: 10e6,
-            slippageBps: 500,
+            slippageBps: 100,
             stake: false,
             token0Route: emptyRoute,
             token1Route: emptyRoute
@@ -118,7 +118,7 @@ contract SequentialRoutingTest is Test {
             tickUpper: ((currentTick + 200) / tickSpacing) * tickSpacing,
             deadline: block.timestamp + 300,
             usdcAmount: 25e6,
-            slippageBps: 1000, // 10% for testing
+            slippageBps: 100, // 10% for testing
             stake: true,  // STAKE the position
             token0Route: token0Route,
             token1Route: token1Route
@@ -182,7 +182,7 @@ contract SequentialRoutingTest is Test {
             pool: CBBTC_LBTC_POOL,
             deadline: block.timestamp + 300,
             minUsdcOut: 1e6, // Extremely low minimum just to test the flow
-            slippageBps: 1000, // 10% slippage (max allowed by contract)
+            slippageBps: 100, // 10% slippage (max allowed by contract)
             token0Route: exitToken0Route, // Route for cbBTC -> USDC
             token1Route: exitToken1Route  // Route for LBTC -> cbBTC -> USDC
         });
@@ -251,7 +251,7 @@ contract SequentialRoutingTest is Test {
             tickUpper: ((currentTick + 200) / tickSpacing) * tickSpacing,
             deadline: block.timestamp + 300,
             usdcAmount: 20e6,
-            slippageBps: 1000, // 10% for testing
+            slippageBps: 100, // 10% for testing
             stake: false,
             token0Route: token0Route,
             token1Route: token1Route
