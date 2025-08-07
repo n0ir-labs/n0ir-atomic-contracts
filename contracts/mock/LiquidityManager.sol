@@ -507,8 +507,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     // - Formula: Y = 1/X but accounting for decimals
                     // - Y = (1 * 10^6) / (X / 10^18) = 10^6 * 10^18 / X = 10^24 / X
                     // - But since X can be > 10^24, we need 10^30 / X to get enough precision
-                    // - Then the result is already in 6 decimals (no need to divide again)
-                    price = 1e30 / rate;
+                    // - Result needs to be multiplied by 1e6 to get proper USDC decimals
+                    price = (1e30 / rate) * 1e6;
                     
                     // Ensure price is non-zero
                     if (price > 0) {
