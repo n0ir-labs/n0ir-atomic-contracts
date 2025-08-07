@@ -1,59 +1,90 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity 0.8.26;
 
-import "./WalletRegistry.sol";
-import "./AtomicBase.sol";
-import "@interfaces/IUniversalRouter.sol";
-import "@interfaces/IPermit2.sol";
-import "@interfaces/INonfungiblePositionManager.sol";
-import "@interfaces/IGauge.sol";
-import "@interfaces/ICLPool.sol";
-import "@interfaces/IMixedQuoter.sol";
-import "@interfaces/ISugarHelper.sol";
-import "@interfaces/IERC20.sol";
-import "@interfaces/IGaugeFactory.sol";
-import "@interfaces/IVoter.sol";
-import "@interfaces/IAerodromeOracle.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
-import "forge-std/console.sol";
-
-interface IERC20Metadata {
-    function decimals() external view returns (uint8);
-}
+import {WalletRegistry} from "./WalletRegistry.sol";
+import {AtomicBase} from "./AtomicBase.sol";
+import {IUniversalRouter} from "@interfaces/IUniversalRouter.sol";
+import {IPermit2} from "@interfaces/IPermit2.sol";
+import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
+import {IGauge} from "@interfaces/IGauge.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
+import {IMixedQuoter} from "@interfaces/IMixedQuoter.sol";
+import {ISugarHelper} from "@interfaces/ISugarHelper.sol";
+import {IERC20} from "@interfaces/IERC20.sol";
+import {IGaugeFactory} from "@interfaces/IGaugeFactory.sol";
+import {IVoter} from "@interfaces/IVoter.sol";
+import {IAerodromeOracle} from "@interfaces/IAerodromeOracle.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title LiquidityManager
- * @notice Mock contract that mirrors N0irProtocol functionality with different naming
- * @dev Full implementation of N0irProtocol features for testing
+ * @notice Manages atomic liquidity operations for Aerodrome V3 Slipstream pools
+ * @dev Implements concentrated liquidity position management with atomic swap/mint/stake capabilities
  */
 contract LiquidityManager is AtomicBase, IERC721Receiver {
+    // ============ Custom Errors ============
+    error InvalidRoute();
+    error InvalidSlippage();
+    error UnauthorizedAccess();
+    error PositionNotFound();
+    error InsufficientBalance();
+    error SwapFailed();
+    error MintFailed();
+    error StakeFailed();
+    error GaugeNotFound();
+    error OraclePriceUnavailable();
+    error InvalidRecipient();
+    error ArrayLengthMismatch();
+    error InvalidTickSpacing();
+    error EmergencyRecoveryFailed();
+    
+    // ============ State Variables ============
+    /// @notice Registry contract for wallet access control
     WalletRegistry public immutable walletRegistry;
     
-    // Ownership tracking for staked positions
+    /// @notice Tracks ownership of staked positions (tokenId => owner)
     mapping(uint256 => address) public stakedPositionOwners;
     
-    // Core protocol addresses
+    // ============ Constants ============
+    /// @notice Core contracts - immutable for gas optimization
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
-    address public constant SWAP_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5; // Aerodrome SwapRouter (fallback for problematic pools)
+    address public constant SWAP_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5; // Fallback router
     IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0);
     ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     IAerodromeOracle public constant ORACLE = IAerodromeOracle(0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2);
+    
+    /// @notice Gauge and voting infrastructure
     address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
     address public constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
+    
+    /// @notice Token addresses
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
     address public constant WETH = 0x4200000000000000000000000000000000000006;
     address public constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address constant NONE_CONNECTOR = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
     
+    /// @notice Oracle connector for direct routing
+    address private constant NONE_CONNECTOR = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
+    
+    /// @notice Slippage and precision constants
     uint256 private constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
     uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10%
+    uint256 private constant BPS_DENOMINATOR = 10000;
     uint256 private constant Q96 = 2**96;
     uint256 private constant Q128 = 2**128;
+    uint256 private constant MAX_TICK = 887272;
     
-    // Events (matching N0irProtocol but renamed)
+    // ============ Events ============
+    /// @notice Emitted when a new position is created
+    /// @param user The address creating the position
+    /// @param tokenId The NFT token ID of the created position
+    /// @param pool The pool address
+    /// @param usdcIn Amount of USDC invested
+    /// @param liquidity Amount of liquidity minted
+    /// @param staked Whether the position was staked
     event PositionCreated(
         address indexed user,
         uint256 indexed tokenId,
@@ -63,6 +94,11 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         bool staked
     );
     
+    /// @notice Emitted when a position is closed
+    /// @param user The address closing the position
+    /// @param tokenId The NFT token ID being closed
+    /// @param usdcOut Amount of USDC returned
+    /// @param aeroRewards Amount of AERO rewards claimed
     event PositionClosed(
         address indexed user,
         uint256 indexed tokenId,
@@ -70,57 +106,89 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 aeroRewards
     );
     
-    // Route type classification
+    /// @notice Emitted when tokens are recovered
+    event TokensRecovered(address indexed token, address indexed to, uint256 amount);
+    
+    /// @notice Emitted when a swap is executed
+    event SwapExecuted(
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    );
+    
+    // ============ Type Definitions ============
+    /// @notice Defines the type of routing strategy
     enum RouteType {
         EMPTY,          // No swap needed (token is USDC)
         DIRECT,         // Direct swap from USDC to token
         INTERMEDIATE    // Needs intermediate token (sequential swap)
     }
     
-    // Structs (matching N0irProtocol)
+    /// @notice Defines a swap route through pools
+    /// @param pools Array of pool addresses to route through
+    /// @param tokens Array of token addresses in the route
+    /// @param tickSpacings Array of tick spacings for each pool
     struct SwapRoute {
         address[] pools;
         address[] tokens;
         int24[] tickSpacings;
     }
     
+    /// @notice Parameters for creating a position
     struct PositionParams {
-        address pool;
-        int24 tickLower;
-        int24 tickUpper;
-        uint256 deadline;
-        uint256 usdcAmount;
-        uint256 slippageBps;
-        bool stake;
-        SwapRoute token0Route;
-        SwapRoute token1Route;
+        address pool;           // Target pool address
+        int24 tickLower;        // Lower tick boundary
+        int24 tickUpper;        // Upper tick boundary
+        uint256 deadline;       // Transaction deadline
+        uint256 usdcAmount;     // USDC amount to invest
+        uint256 slippageBps;    // Slippage tolerance in basis points
+        bool stake;             // Whether to stake in gauge
+        SwapRoute token0Route;  // Routing for token0
+        SwapRoute token1Route;  // Routing for token1
     }
     
+    /// @notice Parameters for exiting a position
     struct ExitParams {
-        uint256 tokenId;
-        address pool;
-        uint256 deadline;
-        uint256 minUsdcOut;
-        uint256 slippageBps;
-        SwapRoute token0Route;
-        SwapRoute token1Route;
+        uint256 tokenId;        // Position NFT token ID
+        address pool;           // Pool address
+        uint256 deadline;       // Transaction deadline
+        uint256 minUsdcOut;     // Minimum USDC to receive
+        uint256 slippageBps;    // Slippage tolerance in basis points
+        SwapRoute token0Route;  // Routing for token0 to USDC
+        SwapRoute token1Route;  // Routing for token1 to USDC
     }
     
+    // ============ Constructor ============
+    /// @notice Initializes the LiquidityManager with a wallet registry
+    /// @param _walletRegistry Address of the wallet registry contract
+    /// @dev Registry can be address(0) for permissionless deployment
     constructor(address _walletRegistry) {
-        walletRegistry = WalletRegistry(_walletRegistry);
+        if (_walletRegistry != address(0)) {
+            walletRegistry = WalletRegistry(_walletRegistry);
+        }
     }
     
+    // ============ Modifiers ============
+    /// @notice Ensures caller is authorized to act on behalf of user
+    /// @param user The user address to check authorization for
     modifier onlyAuthorized(address user) {
-        require(
-            msg.sender == user || 
-            (address(walletRegistry) != address(0) && walletRegistry.isWallet(msg.sender)),
-            "Unauthorized"
-        );
+        if (msg.sender != user) {
+            if (address(walletRegistry) == address(0) || !walletRegistry.isWallet(msg.sender)) {
+                revert UnauthorizedAccess();
+            }
+        }
         _;
     }
     
+    // ============ External Functions ============
+    
     /**
-     * @notice Creates a position (mirrors swapMintAndStake)
+     * @notice Creates a new concentrated liquidity position
+     * @param params Position creation parameters
+     * @return tokenId The NFT token ID of the created position
+     * @return liquidity The amount of liquidity minted
+     * @dev Performs atomic swap, mint, and optional stake operations
      */
     function createPosition(PositionParams calldata params)
         external
@@ -274,7 +342,11 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
     
     /**
-     * @notice Closes a position (mirrors fullExit)
+     * @notice Closes an existing position and returns USDC
+     * @param params Exit parameters including tokenId and routes
+     * @return usdcOut Amount of USDC returned to user
+     * @return aeroRewards Amount of AERO rewards claimed
+     * @dev Handles both staked and unstaked positions
      */
     function closePosition(ExitParams calldata params)
         external
@@ -361,9 +433,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         (amount0, amount1) = POSITION_MANAGER.collect(collectParams);
         POSITION_MANAGER.burn(params.tokenId);
         
-        // Swap tokens back to USDC (reuse effectiveSlippage from above)
-        console.log("Closing position - token0:", token0, "amount0:", amount0);
-        console.log("Closing position - token1:", token1, "amount1:", amount1);
+        // Swap tokens back to USDC with slippage protection
         
         if (token0 != USDC && amount0 > 0) {
             _approveTokenToPermit2(token0, amount0);
@@ -428,6 +498,19 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
     }
     
+    // ============ Public View Functions ============
+    
+    /**
+     * @notice Calculates optimal USDC allocation for a position
+     * @param totalUSDC Total USDC amount to allocate
+     * @param token0 First token address
+     * @param token1 Second token address
+     * @param tickLower Lower tick boundary
+     * @param tickUpper Upper tick boundary
+     * @param pool Pool contract
+     * @return usdc0 USDC amount to allocate for token0
+     * @return usdc1 USDC amount to allocate for token1
+     */
     function calculateOptimalUSDCAllocation(
         uint256 totalUSDC,
         address token0,
@@ -506,10 +589,13 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
     
+    // ============ Internal Functions ============
+    
     /**
      * @notice Analyzes routes to determine if sequential swapping is needed
+     * @dev Checks for dependencies between token routes
      * @return needsSequential True if token1 depends on token0
-     * @return intermediateToken The intermediate token to use (address(0) if none)
+     * @return intermediateToken The intermediate token to use
      */
     function _analyzeRoutes(
         SwapRoute memory token0Route,
@@ -534,7 +620,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
     
     /**
-     * @notice Executes sequential swaps when token1 depends on token0 or both need same intermediate
+     * @notice Executes sequential swaps for dependent routes
+     * @dev Handles cases where token1 depends on token0
      */
     function _executeSequentialSwaps(
         PositionParams memory params,
@@ -652,6 +739,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
     
+    /**
+     * @notice Gets token price in USDC via oracle
+     * @param token Token address to get price for
+     * @return price Token price in USDC with 6 decimals
+     * @dev Tries multiple connectors for best route
+     */
     function getTokenPriceViaOracle(address token) public view returns (uint256 price) {
         if (token == USDC) {
             return 1e6;
@@ -699,9 +792,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
         
         // Revert if oracle fails for all connectors
-        revert("Oracle price unavailable");
+        revert OraclePriceUnavailable();
     }
     
+    /**
+     * @notice Approves token to Permit2 contract
+     * @param token Token address to approve
+     * @param amount Amount to approve (uses max if needed)
+     */
     function _approveTokenToPermit2(address token, uint256 amount) internal {
         if (IERC20(token).allowance(address(this), address(PERMIT2)) < amount) {
             IERC20(token).approve(address(PERMIT2), type(uint256).max);
@@ -733,25 +831,22 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Calculate minAmountOut using quoter with the provided pool
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, pool);
         
-        console.log("\n_swapExactInputDirect:");
-        console.log("  Pool:", pool);
-        console.log("  TokenIn:", tokenIn);
-        console.log("  TokenOut:", tokenOut);
-        console.log("  AmountIn:", amountIn);
-        console.log("  MinAmountOut:", minAmountOut);
+        // Log swap parameters for debugging (remove in production)
+        // _swapExactInputDirect: pool, tokenIn, tokenOut, amountIn, minAmountOut
         
         // Ensure we have the tokens
-        require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
+        if (IERC20(tokenIn).balanceOf(address(this)) < amountIn) {
+            revert InsufficientBalance();
+        }
         
         // Get tick spacing to determine which router to use
         int24 tickSpacing = ICLPool(pool).tickSpacing();
-        console.log("  TickSpacing:", uint256(int256(tickSpacing)));
+        // TickSpacing logged for router selection
         
         // For pools with tick spacing = 1, use SwapRouter (has correct factory)
         // For other pools, use Universal Router
         if (tickSpacing == 1) {
-            // Use SwapRouter for tick spacing = 1 pools
-            console.log("  Using SwapRouter fallback");
+            // Use SwapRouter for tick spacing = 1 pools (factory compatibility)
             amountOut = _swapViaSwapRouter(tokenIn, tokenOut, amountIn, tickSpacing, minAmountOut);
         } else {
             // Use Universal Router for standard pools
@@ -799,7 +894,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
         }
         
-        require(amountOut >= minAmountOut, "Insufficient output amount");
+        if (amountOut < minAmountOut) {
+            revert InsufficientOutput(minAmountOut, amountOut);
+        }
     }
     
     function _swapViaSwapRouter(
@@ -809,11 +906,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         int24 tickSpacing,
         uint256 minAmountOut
     ) internal returns (uint256 amountOut) {
-        console.log("\n_swapViaSwapRouter:");
-        console.log("  TokenIn:", tokenIn);
-        console.log("  TokenOut:", tokenOut);
-        console.log("  AmountIn:", amountIn);
-        console.log("  MinAmountOut:", minAmountOut);
+        // SwapRouter fallback for special pools
         
         // Approve SwapRouter to spend our tokens
         if (IERC20(tokenIn).allowance(address(this), SWAP_ROUTER) < amountIn) {
@@ -845,14 +938,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     revert(add(32, result), mload(result))
                 }
             }
-            revert("SwapRouter swap failed");
+            revert SwapFailed();
         }
         
         amountOut = abi.decode(result, (uint256));
         
         // Verify the output
         uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
-        require(actualReceived >= minAmountOut, "Insufficient output from SwapRouter");
+        if (actualReceived < minAmountOut) {
+            revert InsufficientOutput(minAmountOut, actualReceived);
+        }
         
         return actualReceived;
     }
@@ -864,24 +959,20 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         SwapRoute memory route,
         uint256 slippageBps
     ) internal returns (uint256 amountOut) {
-        require(route.pools.length > 0, "Empty route");
-        require(route.tokens.length == route.pools.length + 1, "Invalid route tokens");
-        require(route.tickSpacings.length == route.pools.length, "Invalid route tick spacings");
+        if (route.pools.length == 0) revert InvalidRoute();
+        if (route.tokens.length != route.pools.length + 1) revert ArrayLengthMismatch();
+        if (route.tickSpacings.length != route.pools.length) revert ArrayLengthMismatch();
         
-        console.log("\n_executeSwapWithRoute:");
-        console.log("  TokenIn:", tokenIn);
-        console.log("  TokenOut:", tokenOut);
-        console.log("  AmountIn:", amountIn);
-        console.log("  Number of hops:", route.pools.length);
+        // Execute swap through specified route
         
         // For single-hop use the pool, for multi-hop pass address(0)
         address poolForQuote = route.pools.length == 1 ? route.pools[0] : address(0);
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, poolForQuote);
-        console.log("  MinAmountOut (oracle-based):", minAmountOut);
+        // MinAmountOut calculated from oracle/quoter
         
         // Single hop swap
         if (route.pools.length == 1) {
-            console.log("  Single hop swap");
+            // Single hop optimization
             return _swapExactInputDirect(
                 route.tokens[0],
                 route.tokens[1],
@@ -892,8 +983,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
         
         // Multi-hop swap - execute each hop sequentially
-        // Universal Router doesn't support multi-hop natively, so we execute each swap separately
-        console.log("  Multi-hop swap");
+        // Note: Sequential execution for complex routes
         uint256 currentAmount = amountIn;
         address currentToken = tokenIn;
         
@@ -902,11 +992,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             address pool = route.pools[i];
             int24 tickSpacing = route.tickSpacings[i];
             
-            console.log("\n  Hop", i + 1, "of", route.pools.length);
-            console.log("    From:", currentToken);
-            console.log("    To:", nextToken);
-            console.log("    Pool:", pool);
-            console.log("    Input amount:", currentAmount);
+            // Execute hop i+1 through pool
             
             // Calculate slippage for this hop (distribute evenly across hops)
             uint256 hopSlippage = slippageBps / route.pools.length;
@@ -920,15 +1006,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                 hopSlippage
             );
             
-            console.log("    Output amount:", currentAmount);
+            // Continue to next hop
             
             currentToken = nextToken;
         }
         
         amountOut = currentAmount;
-        console.log("\n  Final output:", amountOut);
-        console.log("  Required minimum:", minAmountOut);
-        require(amountOut >= minAmountOut, "Insufficient output from multi-hop");
+        // Verify final output meets minimum requirements
+        if (amountOut < minAmountOut) {
+            revert InsufficientOutput(minAmountOut, amountOut);
+        }
     }
     
     function _encodeMultihopPath(SwapRoute memory route) internal pure returns (bytes memory) {
@@ -988,9 +1075,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return requestedSlippage;
     }
     
+    /**
+     * @notice Calculates sqrt price from tick
+     * @param tick The tick value
+     * @return The sqrt price as Q96
+     */
     function getSqrtRatioAtTick(int24 tick) internal pure returns (uint160) {
         uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
-        require(absTick <= uint256(887272), "T");
+        if (absTick > MAX_TICK) revert InvalidTickRange(tick, tick);
         
         uint256 ratio = absTick & 0x1 != 0 ? 0xfffcb933bd6fad37aa2d162d1a594001 : 0x100000000000000000000000000000000;
         if (absTick & 0x2 != 0) ratio = (ratio * 0xfff97272373d413259a46990580e213a) >> 128;
@@ -1014,13 +1106,17 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (absTick & 0x80000 != 0) ratio = (ratio * 0x48a170391f7dc42444e8fa2) >> 128;
         
         if (tick > 0) {
-            require(ratio > 0, "Invalid ratio for tick");
+            if (ratio == 0) revert InvalidTickRange(tick, tick);
             ratio = type(uint256).max / ratio;
         }
         
         return uint160((ratio >> 32) + (ratio % (1 << 32) == 0 ? 0 : 1));
     }
     
+    /**
+     * @notice Handles receipt of NFT positions
+     * @dev Required for IERC721Receiver compliance
+     */
     function onERC721Received(
         address,
         address,
@@ -1030,15 +1126,28 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return this.onERC721Received.selector;
     }
     
+    /**
+     * @notice Recovers stuck tokens
+     * @param token Token address to recover
+     * @param amount Amount to recover
+     * @dev Only callable by wallet registry
+     */
     function recoverToken(address token, uint256 amount) external {
-        require(msg.sender == address(walletRegistry), "Only registry");
+        if (msg.sender != address(walletRegistry)) revert UnauthorizedAccess();
         IERC20(token).transfer(msg.sender, amount);
+        emit TokensRecovered(token, msg.sender, amount);
     }
     
+    /**
+     * @notice Gets token decimals with caching for common tokens
+     * @param token Token address
+     * @return Token decimals (defaults to 18 if not available)
+     */
     function _getTokenDecimals(address token) internal view returns (uint256) {
         // Cache common tokens to save gas
         if (token == USDC) return 6;
         if (token == WETH) return 18;
+        if (token == CBBTC) return 8;
         
         // For other tokens, fetch from contract
         try IERC20Metadata(token).decimals() returns (uint8 decimals) {
@@ -1049,23 +1158,27 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
     
+    // ============ Admin Functions ============
+    
     /**
-     * @notice Emergency function to recover stuck staked positions
-     * @dev Only callable by wallet registry owner for positions without ownership records
+     * @notice Emergency recovery for stuck staked positions
      * @param tokenId The stuck position token ID
      * @param pool The pool address
      * @param recipient The address to send recovered funds to
+     * @return usdcOut Amount of USDC recovered
+     * @return aeroRewards Amount of AERO rewards recovered
+     * @dev Only for positions without ownership records
      */
     function emergencyRecoverStakedPosition(
         uint256 tokenId,
         address pool,
         address recipient
     ) external returns (uint256 usdcOut, uint256 aeroRewards) {
-        require(msg.sender == address(walletRegistry), "Only registry");
-        require(stakedPositionOwners[tokenId] == address(0), "Position has owner");
+        if (msg.sender != address(walletRegistry)) revert UnauthorizedAccess();
+        if (stakedPositionOwners[tokenId] != address(0)) revert UnauthorizedAccess();
         
         address gauge = _findGaugeForPool(pool);
-        require(gauge != address(0), "No gauge found");
+        if (gauge == address(0)) revert GaugeNotFound();
         
         // Track AERO before withdrawal
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
@@ -1142,19 +1255,21 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         emit PositionClosed(recipient, tokenId, usdcOut, aeroRewards);
     }
     
+    // ============ External View Functions ============
+    
     /**
-     * @notice Check if a user owns a staked position
+     * @notice Returns the owner of a staked position
      * @param tokenId The position NFT token ID
-     * @return owner The owner address (address(0) if not staked through this contract)
+     * @return owner The owner address (address(0) if not staked)
      */
     function getStakedPositionOwner(uint256 tokenId) external view returns (address owner) {
         return stakedPositionOwners[tokenId];
     }
     
     /**
-     * @notice Check if a position is staked through this contract
+     * @notice Checks if a position is staked through this contract
      * @param tokenId The position NFT token ID
-     * @return isStaked True if the position is staked through this contract
+     * @return isStaked True if the position is staked
      */
     function isPositionStaked(uint256 tokenId) external view returns (bool isStaked) {
         return stakedPositionOwners[tokenId] != address(0);
@@ -1169,7 +1284,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     ) internal returns (uint256 minAmountOut) {  // Changed from view to non-view for quoter
         // If no pool provided (multi-hop case), return minimum
         if (pool == address(0)) {
-            console.log("  No direct pool, using minimum for multi-hop");
+            // No direct pool available, use conservative minimum
             return 1;
         }
         
@@ -1186,15 +1301,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                 sqrtPriceLimitX96: 0
             })
         ) returns (uint256 amountOut, uint160, uint32, uint256) {
-            console.log("  Quoter result: expectedOut =", amountOut);
+            // Quoter provided expected output
             
             // Apply slippage to the quoted amount
             minAmountOut = (amountOut * (10000 - slippageBps)) / 10000;
             
-            console.log("  MinAmountOut with slippage:", minAmountOut);
+            // Applied slippage tolerance
         } catch {
-            // Fallback: use a very conservative minimum (50% of input value)
-            console.log("  Quoter failed, using conservative fallback");
+            // Fallback: quoter unavailable, use conservative minimum
             minAmountOut = 1; // Minimum 1 unit to ensure swap succeeds
         }
         
