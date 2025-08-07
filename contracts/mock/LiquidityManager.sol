@@ -29,6 +29,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     
     // Core protocol addresses
     IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
+    address public constant SWAP_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5; // Aerodrome SwapRouter (fallback for problematic pools)
     IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
     INonfungiblePositionManager public constant POSITION_MANAGER = INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x0A5aA5D3a4d28014f967Bf0f29EAA3FF9807D5c6);
@@ -729,54 +730,110 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Ensure we have the tokens
         require(IERC20(tokenIn).balanceOf(address(this)) >= amountIn, "Insufficient tokenIn balance");
         
-        // Handle approvals based on token type
-        if (tokenIn != USDC) {
-            // For non-USDC tokens, approve Permit2 if needed
-            _approveTokenToPermit2(tokenIn, amountIn);
-            _approveUniversalRouterViaPermit2(tokenIn, amountIn);
-        } else {
-            // For USDC, use existing approval logic
-            if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
-                IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
-            }
-            
-            // Then, approve Universal Router on Permit2
-            PERMIT2.approve(
-                tokenIn,
-                address(UNIVERSAL_ROUTER),
-                uint160(amountIn),
-                uint48(block.timestamp + 3600) // expiration
-            );
-        }
-        
-        bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
-        bytes[] memory inputs = new bytes[](1);
-        
-        // For Aerodrome V3, we need tick spacing, not fee
-        // The Universal Router uses tick spacing to compute the pool address
+        // Get tick spacing to determine which router to use
         int24 tickSpacing = ICLPool(pool).tickSpacing();
         
-        // Encode path with tick spacing as int24 (3 bytes)
-        bytes memory path = abi.encodePacked(
-            tokenIn,
-            tickSpacing,  // Tick spacing as int24 (3 bytes)
-            tokenOut
-        );
-        
-        inputs[0] = abi.encode(
-            address(this),  // recipient
-            amountIn,       // amountIn
-            minAmountOut,   // amountOutMinimum
-            path,           // path with tick spacing
-            true,           // payerIsUser = true (Universal Router pulls via Permit2)
-            true            // useSlipstreamPools = true for Aerodrome V3 CL pools
-        );
-        
-        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
-        UNIVERSAL_ROUTER.execute{value: 0}(commands, inputs);
-        amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        // For pools with tick spacing = 1, use SwapRouter (has correct factory)
+        // For other pools, use Universal Router
+        if (tickSpacing == 1) {
+            // Use SwapRouter for tick spacing = 1 pools
+            amountOut = _swapViaSwapRouter(tokenIn, tokenOut, amountIn, tickSpacing, minAmountOut);
+        } else {
+            // Use Universal Router for standard pools
+            // Handle approvals based on token type
+            if (tokenIn != USDC) {
+                // For non-USDC tokens, approve Permit2 if needed
+                _approveTokenToPermit2(tokenIn, amountIn);
+                _approveUniversalRouterViaPermit2(tokenIn, amountIn);
+            } else {
+                // For USDC, use existing approval logic
+                if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
+                    IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
+                }
+                
+                // Then, approve Universal Router on Permit2
+                PERMIT2.approve(
+                    tokenIn,
+                    address(UNIVERSAL_ROUTER),
+                    uint160(amountIn),
+                    uint48(block.timestamp + 3600) // expiration
+                );
+            }
+            
+            bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
+            bytes[] memory inputs = new bytes[](1);
+            
+            // Encode path with tick spacing as int24 (3 bytes)
+            bytes memory path = abi.encodePacked(
+                tokenIn,
+                tickSpacing,  // Tick spacing as int24 (3 bytes)
+                tokenOut
+            );
+            
+            inputs[0] = abi.encode(
+                address(this),  // recipient
+                amountIn,       // amountIn
+                minAmountOut,   // amountOutMinimum
+                path,           // path with tick spacing
+                true,           // payerIsUser = true (Universal Router pulls via Permit2)
+                true            // useSlipstreamPools = true for Aerodrome V3 CL pools
+            );
+            
+            uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+            UNIVERSAL_ROUTER.execute{value: 0}(commands, inputs);
+            amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        }
         
         require(amountOut >= minAmountOut, "Insufficient output amount");
+    }
+    
+    function _swapViaSwapRouter(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        int24 tickSpacing,
+        uint256 minAmountOut
+    ) internal returns (uint256 amountOut) {
+        // Approve SwapRouter to spend our tokens
+        if (IERC20(tokenIn).allowance(address(this), SWAP_ROUTER) < amountIn) {
+            IERC20(tokenIn).approve(SWAP_ROUTER, type(uint256).max);
+        }
+        
+        // Call exactInputSingle on SwapRouter
+        // The function signature is: exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
+        
+        bytes memory callData = abi.encodeWithSelector(
+            bytes4(keccak256("exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))")),
+            tokenIn,                    // tokenIn
+            tokenOut,                   // tokenOut
+            tickSpacing,                // tickSpacing
+            address(this),              // recipient
+            block.timestamp + 300,      // deadline
+            amountIn,                   // amountIn
+            minAmountOut,               // amountOutMinimum
+            uint160(0)                  // sqrtPriceLimitX96 (0 = no limit)
+        );
+        
+        (bool success, bytes memory result) = SWAP_ROUTER.call(callData);
+        
+        if (!success) {
+            if (result.length > 0) {
+                // Bubble up the revert reason
+                assembly {
+                    revert(add(32, result), mload(result))
+                }
+            }
+            revert("SwapRouter swap failed");
+        }
+        
+        amountOut = abi.decode(result, (uint256));
+        
+        // Verify the output
+        uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        require(actualReceived >= minAmountOut, "Insufficient output from SwapRouter");
+        
+        return actualReceived;
     }
     
     function _executeSwapWithRoute(

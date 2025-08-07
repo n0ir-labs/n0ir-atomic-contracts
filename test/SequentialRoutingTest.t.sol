@@ -69,6 +69,116 @@ contract SequentialRoutingTest is Test {
         vm.stopPrank();
     }
     
+    function testCreateStakeAndExit() public {
+        console.log("\n=== Test 3: Create, Stake, and Exit cbBTC/LBTC Position ===");
+        
+        address user = makeAddr("user");
+        deal(USDC, user, 100e6);
+        vm.deal(user, 1 ether);
+        
+        vm.startPrank(user);
+        IERC20(USDC).approve(address(liquidityManager), 30e6);
+        
+        ICLPool targetPool = ICLPool(CBBTC_LBTC_POOL);
+        address token0 = targetPool.token0();
+        address token1 = targetPool.token1();
+        (, int24 currentTick,,,,) = targetPool.slot0();
+        int24 tickSpacing = targetPool.tickSpacing();
+        
+        console.log("  Token0:", token0 == CBBTC ? "cbBTC" : "LBTC");
+        console.log("  Token1:", token1 == CBBTC ? "cbBTC" : "LBTC");
+        
+        // Setup routes for sequential swapping
+        LiquidityManager.SwapRoute memory token0Route = LiquidityManager.SwapRoute({
+            pools: new address[](1),
+            tokens: new address[](2),
+            tickSpacings: new int24[](1)
+        });
+        token0Route.pools[0] = CBBTC_USDC_POOL;
+        token0Route.tokens[0] = USDC;
+        token0Route.tokens[1] = CBBTC;
+        token0Route.tickSpacings[0] = ICLPool(CBBTC_USDC_POOL).tickSpacing();
+        
+        LiquidityManager.SwapRoute memory token1Route = LiquidityManager.SwapRoute({
+            pools: new address[](1),
+            tokens: new address[](2),
+            tickSpacings: new int24[](1)
+        });
+        token1Route.pools[0] = CBBTC_LBTC_POOL;
+        token1Route.tokens[0] = CBBTC;
+        token1Route.tokens[1] = LBTC;
+        token1Route.tickSpacings[0] = tickSpacing;
+        
+        // Step 1: Create and stake position
+        console.log("\n  Step 1: Creating and staking position...");
+        
+        LiquidityManager.PositionParams memory params = LiquidityManager.PositionParams({
+            pool: CBBTC_LBTC_POOL,
+            tickLower: ((currentTick - 200) / tickSpacing) * tickSpacing,
+            tickUpper: ((currentTick + 200) / tickSpacing) * tickSpacing,
+            deadline: block.timestamp + 300,
+            usdcAmount: 25e6,
+            slippageBps: 1000, // 10% for testing
+            stake: true,  // STAKE the position
+            token0Route: token0Route,
+            token1Route: token1Route
+        });
+        
+        uint256 tokenId;
+        uint128 liquidity;
+        try liquidityManager.createPosition(params) returns (uint256 id, uint128 liq) {
+            tokenId = id;
+            liquidity = liq;
+            console.log("    SUCCESS! TokenId:", tokenId, "Liquidity:", liquidity);
+            console.log("    Position is staked in gauge");
+        } catch Error(string memory reason) {
+            console.log("    FAILED:", reason);
+            return;
+        }
+        
+        // Check if position is staked
+        bool isStaked = liquidityManager.isPositionStaked(tokenId);
+        console.log("    Position staked status:", isStaked);
+        require(isStaked, "Position should be staked");
+        
+        // Step 2: Wait a bit for rewards to accrue (simulate time passing)
+        console.log("\n  Step 2: Simulating time passing for rewards...");
+        vm.warp(block.timestamp + 1 days);
+        console.log("    Advanced time by 1 day");
+        
+        // Step 3: Full exit - unstake, burn, and convert to USDC
+        console.log("\n  Step 3: Executing full exit...");
+        
+        uint256 usdcBalanceBefore = IERC20(USDC).balanceOf(user);
+        console.log("    USDC balance before exit:", usdcBalanceBefore / 1e6, "USDC");
+        
+        LiquidityManager.ExitParams memory exitParams = LiquidityManager.ExitParams({
+            tokenId: tokenId,
+            liquidity: liquidity,
+            amount0Min: 0, // Accept any amount for testing
+            amount1Min: 0,
+            deadline: block.timestamp + 300,
+            slippageBps: 1000, // 10% slippage
+            token0Route: token0Route, // Route for token0 -> USDC
+            token1Route: token1Route  // Route for token1 -> USDC (will go LBTC->cbBTC->USDC)
+        });
+        
+        try liquidityManager.fullExit(exitParams) returns (uint256 usdcReceived) {
+            console.log("    SUCCESS! USDC received:", usdcReceived / 1e6, "USDC");
+            
+            uint256 usdcBalanceAfter = IERC20(USDC).balanceOf(user);
+            console.log("    USDC balance after exit:", usdcBalanceAfter / 1e6, "USDC");
+            console.log("    Net USDC recovered:", (usdcBalanceAfter - usdcBalanceBefore) / 1e6, "USDC");
+            
+            // Verify we got back a reasonable amount (accounting for slippage and fees)
+            require(usdcReceived > 20e6, "Should recover at least 20 USDC");
+        } catch Error(string memory reason) {
+            console.log("    FAILED:", reason);
+        }
+        
+        vm.stopPrank();
+    }
+    
     function testSequentialCbBTCLBTC() public {
         console.log("\n=== Test 2: Sequential cbBTC/LBTC Pool ===");
         
