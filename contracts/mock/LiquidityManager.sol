@@ -420,6 +420,10 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 token0PriceInUSDC = getTokenPriceViaOracle(token0);
         uint256 token1PriceInUSDC = getTokenPriceViaOracle(token1);
         
+        // Ensure prices are valid to prevent division by zero
+        require(token0PriceInUSDC > 0, "Invalid token0 price");
+        require(token1PriceInUSDC > 0, "Invalid token1 price");
+        
         // Calculate allocation based on tick position in range
         uint256 tickRange = uint256(int256(tickUpper - tickLower));
         uint256 tickPosition = uint256(int256(currentTick - tickLower));
@@ -475,8 +479,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             return 1e6;
         }
         
-        // Try different connectors in order: NONE, WETH, USDC, cbBTC
-        address[4] memory connectors = [NONE_CONNECTOR, WETH, USDC, CBBTC];
+        // Try different connectors in order: NONE, WETH, cbBTC (skip USDC since src is already USDC)
+        address[3] memory connectors = [NONE_CONNECTOR, WETH, CBBTC];
         
         for (uint i = 0; i < connectors.length; i++) {
             try ORACLE.getRate(
@@ -493,10 +497,23 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
                     // For WETH: if rate = 258926278352007064085601812 (0.000258926... WETH per USDC)
                     // Then 1 WETH = 1 / 0.000258926... = ~3862 USDC
                     
-                    // Calculate: price = 1e6 * 1e18 / rate
-                    // This gives us USDC (with 6 decimals) per 1 unit of token
-                    price = (1e6 * 1e18) / rate;
-                    return price;
+                    // Calculate price: we need to invert the rate
+                    // rate = amount of token per 1 USDC (with 18 decimals)  
+                    // We want: USDC per 1 token (with 6 decimals)
+                    
+                    // The math: 
+                    // - Oracle gives us: X tokens per 1 USDC (with 18 decimals)
+                    // - We want: Y USDC per 1 token (with 6 decimals)
+                    // - Formula: Y = 1/X but accounting for decimals
+                    // - Y = (1 * 10^6) / (X / 10^18) = 10^6 * 10^18 / X = 10^24 / X
+                    // - But since X can be > 10^24, we need 10^30 / X to get enough precision
+                    // - Then the result is already in 6 decimals (no need to divide again)
+                    price = 1e30 / rate;
+                    
+                    // Ensure price is non-zero
+                    if (price > 0) {
+                        return price;
+                    }
                 }
             } catch {
                 continue;
@@ -865,6 +882,10 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Production approach: Use oracle prices for reliable minimum calculation
         uint256 tokenInPrice = getTokenPriceViaOracle(tokenIn);
         uint256 tokenOutPrice = getTokenPriceViaOracle(tokenOut);
+        
+        // Ensure prices are never zero to prevent division by zero
+        require(tokenInPrice > 0, "Invalid tokenIn price");
+        require(tokenOutPrice > 0, "Invalid tokenOut price");
         
         // Get decimals
         uint256 tokenInDecimals = tokenIn == WETH ? 18 : 6;
