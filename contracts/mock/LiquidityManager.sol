@@ -17,6 +17,10 @@ import "@interfaces/IAerodromeOracle.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "forge-std/console.sol";
 
+interface IERC20Metadata {
+    function decimals() external view returns (uint8);
+}
+
 /**
  * @title LiquidityManager
  * @notice Mock contract that mirrors N0irProtocol functionality with different naming
@@ -726,9 +730,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address pool,
         uint256 slippageBps
     ) internal returns (uint256 amountOut) {
-        // For production: Don't rely on quoter, use conservative minimum
-        // Calculate minAmountOut based on oracle prices with extra buffer
-        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
+        // Calculate minAmountOut using quoter with the provided pool
+        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, pool);
         
         console.log("\n_swapExactInputDirect:");
         console.log("  Pool:", pool);
@@ -871,8 +874,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         console.log("  AmountIn:", amountIn);
         console.log("  Number of hops:", route.pools.length);
         
-        // Use oracle-based minimum calculation instead of quoter
-        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps);
+        // For single-hop use the pool, for multi-hop pass address(0)
+        address poolForQuote = route.pools.length == 1 ? route.pools[0] : address(0);
+        uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, poolForQuote);
         console.log("  MinAmountOut (oracle-based):", minAmountOut);
         
         // Single hop swap
@@ -1031,15 +1035,18 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         IERC20(token).transfer(msg.sender, amount);
     }
     
-    function _getTokenDecimals(address token) internal pure returns (uint256) {
-        // Handle known tokens
-        if (token == 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) return 6; // USDC
-        if (token == 0x4200000000000000000000000000000000000006) return 18; // WETH
-        if (token == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf) return 8; // cbBTC
-        if (token == 0xecAc9C5F704e954931349Da37F60E39f515c11c1) return 8; // LBTC
+    function _getTokenDecimals(address token) internal view returns (uint256) {
+        // Cache common tokens to save gas
+        if (token == USDC) return 6;
+        if (token == WETH) return 18;
         
-        // Default to 18 for unknown tokens
-        return 18;
+        // For other tokens, fetch from contract
+        try IERC20Metadata(token).decimals() returns (uint8 decimals) {
+            return uint256(decimals);
+        } catch {
+            // Default to 18 if decimals() is not implemented
+            return 18;
+        }
     }
     
     /**
@@ -1157,18 +1164,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        uint256 slippageBps
+        uint256 slippageBps,
+        address pool  // Pool is already provided by the caller
     ) internal returns (uint256 minAmountOut) {  // Changed from view to non-view for quoter
-        // Use the quoter to get accurate swap amounts
-        // Find the pool and get its tick spacing
-        address pool = _getPoolForPair(tokenIn, tokenOut);
-        
-        // If no direct pool, just return minimum 1 (for multi-hop routes)
+        // If no pool provided (multi-hop case), return minimum
         if (pool == address(0)) {
-            console.log("  No direct pool found, using minimum for multi-hop");
+            console.log("  No direct pool, using minimum for multi-hop");
             return 1;
         }
         
+        // Get tick spacing from the provided pool
         int24 tickSpacing = ICLPool(pool).tickSpacing();
         
         // Quote the exact swap amount
@@ -1199,23 +1204,5 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
     
-    function _getPoolForPair(address tokenA, address tokenB) internal view returns (address) {
-        // For now, return known pools
-        // In production, this would query the factory
-        
-        // USDC/cbBTC pool
-        if ((tokenA == USDC && tokenB == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf) ||
-            (tokenB == USDC && tokenA == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf)) {
-            return 0x4e962BB3889Bf030368F56810A9c96B83CB3E778;
-        }
-        
-        // cbBTC/LBTC pool  
-        if ((tokenA == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf && tokenB == 0xecAc9C5F704e954931349Da37F60E39f515c11c1) ||
-            (tokenB == 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf && tokenA == 0xecAc9C5F704e954931349Da37F60E39f515c11c1)) {
-            return 0xA44D3Bb767d953711EA4Bce8C0F01f4d7D299aF6;
-        }
-        
-        return address(0);
-    }
     
 }

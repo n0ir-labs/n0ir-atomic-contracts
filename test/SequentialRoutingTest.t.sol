@@ -269,4 +269,182 @@ contract SequentialRoutingTest is Test {
         
         vm.stopPrank();
     }
+    
+    // Helper functions
+    function toArray(address a) internal pure returns (address[] memory) {
+        address[] memory arr = new address[](1);
+        arr[0] = a;
+        return arr;
+    }
+    
+    function toArray(address a, address b) internal pure returns (address[] memory) {
+        address[] memory arr = new address[](2);
+        arr[0] = a;
+        arr[1] = b;
+        return arr;
+    }
+    
+    function toArray(address a, address b, address c) internal pure returns (address[] memory) {
+        address[] memory arr = new address[](3);
+        arr[0] = a;
+        arr[1] = b;
+        arr[2] = c;
+        return arr;
+    }
+    
+    function toIntArray(int24 a) internal pure returns (int24[] memory) {
+        int24[] memory arr = new int24[](1);
+        arr[0] = a;
+        return arr;
+    }
+    
+    function toIntArray(int24 a, int24 b) internal pure returns (int24[] memory) {
+        int24[] memory arr = new int24[](2);
+        arr[0] = a;
+        arr[1] = b;
+        return arr;
+    }
+    
+    function testWETHSuperOETHbFullCycle() public {
+        console.log("\n=== Test 4: Create, Stake, and Exit WETH/superOETHb Position ===");
+        
+        address targetPool = 0x6446021F4E396dA3df4235C62537431372195D38;
+        address weth = 0x4200000000000000000000000000000000000006;
+        address superOETHb = 0xDBFeFD2e8460a6Ee4955A68582F85708BAEA60A3;
+        address usdcWethPool = 0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59; // USDC/WETH pool
+        
+        // Get pool info
+        ICLPool pool = ICLPool(targetPool);
+        address token0 = pool.token0();
+        address token1 = pool.token1();
+        int24 tickSpacing = pool.tickSpacing();
+        
+        console.log("    Token0:", token0 == weth ? "WETH" : "superOETHb");
+        console.log("    Token1:", token1 == superOETHb ? "superOETHb" : "WETH");
+        console.log("    Tick spacing:", uint256(int256(tickSpacing)));
+        
+        uint256 usdcAmount = 50e6; // 50 USDC
+        deal(USDC, address(this), 100e6);
+        IERC20(USDC).approve(address(liquidityManager), 100e6);
+        
+        // Step 1: Create and stake position with sequential routing
+        console.log("\n  Step 1: Creating and staking position...");
+        
+        // Setup entry routes: USDC -> WETH, then WETH -> superOETHb
+        LiquidityManager.SwapRoute memory token0Route;
+        LiquidityManager.SwapRoute memory token1Route;
+        
+        if (token0 == weth) {
+            // Token0 is WETH: USDC -> WETH
+            token0Route = LiquidityManager.SwapRoute({
+                tokens: toArray(USDC, weth),
+                pools: toArray(usdcWethPool),
+                tickSpacings: toIntArray(100) // USDC/WETH pool tick spacing
+            });
+            
+            // Token1 is superOETHb: WETH -> superOETHb (using target pool itself)
+            token1Route = LiquidityManager.SwapRoute({
+                tokens: toArray(weth, superOETHb),
+                pools: toArray(targetPool),
+                tickSpacings: toIntArray(tickSpacing)
+            });
+        } else {
+            // Token0 is superOETHb: WETH -> superOETHb (using target pool)
+            token0Route = LiquidityManager.SwapRoute({
+                tokens: toArray(weth, superOETHb),
+                pools: toArray(targetPool),
+                tickSpacings: toIntArray(tickSpacing)
+            });
+            
+            // Token1 is WETH: USDC -> WETH
+            token1Route = LiquidityManager.SwapRoute({
+                tokens: toArray(USDC, weth),
+                pools: toArray(usdcWethPool),
+                tickSpacings: toIntArray(100)
+            });
+        }
+        
+        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
+            LiquidityManager.PositionParams({
+                pool: targetPool,
+                tickLower: -1000,
+                tickUpper: 1000,
+                deadline: block.timestamp + 300,
+                usdcAmount: usdcAmount,
+                slippageBps: 500,
+                stake: true,  // Stake directly in creation
+                token0Route: token0Route,
+                token1Route: token1Route
+            })
+        );
+        
+        console.log("      SUCCESS! TokenId:", tokenId, "Liquidity:", liquidity);
+        
+        // Verify position is staked
+        bool isStaked = liquidityManager.isPositionStaked(tokenId);
+        console.log("      Position staked status:", isStaked);
+        assertTrue(isStaked, "Position should be staked");
+        
+        // Step 2: Exit position
+        console.log("\n  Step 2: Executing full exit...");
+        
+        uint256 balanceBefore = IERC20(USDC).balanceOf(address(this));
+        console.log("      USDC balance before exit:", balanceBefore / 1e6, "USDC");
+        
+        // Setup exit routes
+        LiquidityManager.SwapRoute memory exitRoute0;
+        LiquidityManager.SwapRoute memory exitRoute1;
+        
+        if (token0 == weth) {
+            // Token0 (WETH) -> USDC
+            exitRoute0 = LiquidityManager.SwapRoute({
+                tokens: toArray(weth, USDC),
+                pools: toArray(usdcWethPool),
+                tickSpacings: toIntArray(100)
+            });
+            
+            // Token1 (superOETHb) -> WETH (using target pool) -> USDC
+            exitRoute1 = LiquidityManager.SwapRoute({
+                tokens: toArray(superOETHb, weth, USDC),
+                pools: toArray(targetPool, usdcWethPool),
+                tickSpacings: toIntArray(tickSpacing, 100)
+            });
+        } else {
+            // Token0 (superOETHb) -> WETH (using target pool) -> USDC
+            exitRoute0 = LiquidityManager.SwapRoute({
+                tokens: toArray(superOETHb, weth, USDC),
+                pools: toArray(targetPool, usdcWethPool),
+                tickSpacings: toIntArray(tickSpacing, 100)
+            });
+            
+            // Token1 (WETH) -> USDC
+            exitRoute1 = LiquidityManager.SwapRoute({
+                tokens: toArray(weth, USDC),
+                pools: toArray(usdcWethPool),
+                tickSpacings: toIntArray(100)
+            });
+        }
+        
+        (uint256 usdcOut, ) = liquidityManager.closePosition(
+            LiquidityManager.ExitParams({
+                tokenId: tokenId,
+                pool: targetPool,
+                deadline: block.timestamp + 300,
+                minUsdcOut: 1,
+                slippageBps: 500,
+                token0Route: exitRoute0,
+                token1Route: exitRoute1
+            })
+        );
+        
+        uint256 balanceAfter = IERC20(USDC).balanceOf(address(this));
+        console.log("      SUCCESS! USDC received:", usdcOut / 1e6, "USDC");
+        console.log("      USDC balance after exit:", balanceAfter / 1e6, "USDC");
+        
+        uint256 netUsdc = balanceAfter - balanceBefore;
+        console.log("      Net USDC recovered:", netUsdc / 1e6, "USDC");
+        
+        assertTrue(usdcOut > 0, "Should receive some USDC");
+        assertTrue(balanceAfter > balanceBefore, "USDC balance should increase");
+    }
 }
