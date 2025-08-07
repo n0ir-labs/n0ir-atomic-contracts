@@ -532,7 +532,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         SwapRoute memory token0Route,
         SwapRoute memory token1Route,
         address token0,
-        address token1
+        address /* token1 */
     )
         internal
         pure
@@ -562,7 +562,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         PositionParams memory params,
         address token0,
         address token1,
-        address intermediateToken,
+        address /* intermediateToken */,
         uint256 slippageBps
     )
         internal
@@ -574,7 +574,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (params.token1Route.tokens.length > 0 && params.token1Route.tokens[0] == token0) {
             // Calculate how much token0 we need in total
             // First, get the optimal allocation as if we had both tokens
-            (uint256 usdc0Equivalent, uint256 usdc1Equivalent) = calculateOptimalUSDCAllocation(
+            (, uint256 usdc1Equivalent) = calculateOptimalUSDCAllocation(
                 params.usdcAmount, token0, token1, params.tickLower, params.tickUpper, pool
             );
 
@@ -583,7 +583,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             if (usdc1Equivalent > 0 && token1 != USDC) {
                 // Estimate token0 amount needed for token1 based on price ratio
                 uint256 token0Price = getTokenPriceViaOracle(token0);
-                uint256 token1Price = getTokenPriceViaOracle(token1);
+                getTokenPriceViaOracle(token1);
 
                 // Amount of token0 needed to get usdc1Equivalent worth of token1
                 // token0Amount = (usdc1Equivalent / token0Price) * 1e18 (adjusting for decimals)
@@ -885,7 +885,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         for (uint256 i = 0; i < route.pools.length; i++) {
             address nextToken = route.tokens[i + 1];
             address pool = route.pools[i];
-            int24 tickSpacing = route.tickSpacings[i];
 
             // Execute hop i+1 through pool
 

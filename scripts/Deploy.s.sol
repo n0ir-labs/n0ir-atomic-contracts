@@ -24,12 +24,9 @@ contract Deploy is Script {
     // Initial operators (only used if USE_WALLET_REGISTRY is true)
     address[] initialOperators;
 
-    function setUp() public {
+    function setUp() public pure {
         // Add initial authorized wallets here if using WalletRegistry
-        if (USE_WALLET_REGISTRY) {
-            // Example: initialWallets.push(0x...);
-            // Example: initialOperators.push(0x...);
-        }
+        // Note: Setup logic moved to run() function for pure compatibility
     }
 
     function run() public returns (address liquidityManager, address walletRegistry) {

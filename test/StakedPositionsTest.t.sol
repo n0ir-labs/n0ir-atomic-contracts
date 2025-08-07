@@ -31,7 +31,7 @@ contract StakedPositionsTest is Test {
         vm.deal(user2, 1 ether);
     }
 
-    function testGetStakedPositionsEmpty() public {
+    function testGetStakedPositionsEmpty() public view {
         // Test that a user with no positions returns empty array
         uint256[] memory positions = liquidityManager.getStakedPositions(user1);
         assertEq(positions.length, 0, "Should return empty array for user with no positions");

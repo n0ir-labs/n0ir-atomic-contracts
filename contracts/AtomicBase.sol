@@ -89,10 +89,9 @@ abstract contract AtomicBase {
     /**
      * @notice Validates pool address
      * @param pool Pool address to validate
-     * @param expectedFactory Expected factory address (unused in current implementation)
      * @dev Can be extended to verify pool against factory
      */
-    function _validatePool(address pool, address expectedFactory) internal pure {
+    function _validatePool(address pool, address /* expectedFactory */) internal pure {
         if (pool == address(0)) {
             revert InvalidPool(pool);
         }
