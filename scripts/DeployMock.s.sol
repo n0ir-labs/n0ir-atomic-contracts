@@ -2,8 +2,8 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import "../contracts/mock/LiquidityManager.sol";
-import "../contracts/mock/WalletRegistry.sol";
+import "../contracts/LiquidityManager.sol";
+import "../contracts/WalletRegistry.sol";
 
 /**
  * @title DeployMock

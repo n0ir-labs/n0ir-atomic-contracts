@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../contracts/mock/LiquidityManager.sol";
+import "../contracts/LiquidityManager.sol";
 import "@interfaces/IERC20.sol";
 import "@interfaces/ICLPool.sol";
 

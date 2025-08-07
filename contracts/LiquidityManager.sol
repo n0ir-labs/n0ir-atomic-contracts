@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "./WalletRegistry.sol";
-import "../AtomicBase.sol";
+import "./AtomicBase.sol";
 import "@interfaces/IUniversalRouter.sol";
 import "@interfaces/IPermit2.sol";
 import "@interfaces/INonfungiblePositionManager.sol";

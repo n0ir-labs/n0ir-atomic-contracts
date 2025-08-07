@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../contracts/mock/LiquidityManager.sol";
+import "../contracts/LiquidityManager.sol";
 
 contract DeployedContractTest is Test {
     address constant DEPLOYED_CONTRACT = 0xA2C602c7Ee83d807d39C2fEb9f4d0b3f94193598;
