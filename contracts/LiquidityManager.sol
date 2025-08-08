@@ -188,19 +188,100 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     // ============ External Functions ============
 
     /**
-     * @notice Creates a new concentrated liquidity position with automatic route discovery
+     * @notice Creates a new concentrated liquidity position with percentage-based range
      * @param pool Target pool address
-     * @param tickLower Lower tick boundary
-     * @param tickUpper Upper tick boundary  
+     * @param rangePercentage Price range as percentage in basis points (500 = ±5% from current price)
      * @param deadline Transaction deadline
      * @param usdcAmount USDC amount to invest
      * @param slippageBps Slippage tolerance in basis points
      * @param stake Whether to stake in gauge
      * @return tokenId The NFT token ID of the created position
      * @return liquidity The amount of liquidity minted
-     * @dev Automatically discovers optimal swap routes using RouteFinder
+     * @dev Automatically calculates ticks based on current price and desired range percentage
      */
     function createPosition(
+        address pool,
+        uint256 rangePercentage,
+        uint256 deadline,
+        uint256 usdcAmount,
+        uint256 slippageBps,
+        bool stake
+    )
+        external
+        nonReentrant
+        deadlineCheck(deadline)
+        validAmount(usdcAmount)
+        onlyAuthorized(msg.sender)
+        returns (uint256 tokenId, uint128 liquidity)
+    {
+        require(address(routeFinder) != address(0), "RouteFinder not configured");
+        require(rangePercentage > 0 && rangePercentage <= 10000, "Invalid range percentage");
+        
+        // Get pool info
+        ICLPool clPool = ICLPool(pool);
+        address token0 = clPool.token0();
+        address token1 = clPool.token1();
+        int24 tickSpacing = clPool.tickSpacing();
+        
+        // Get current tick and calculate range
+        (, int24 currentTick,,,,) = clPool.slot0();
+        (int24 tickLower, int24 tickUpper) = calculateTicksFromPercentage(
+            currentTick,
+            rangePercentage,
+            tickSpacing
+        );
+        
+        // Find routes automatically
+        (
+            RouteFinderLib.SwapRoute memory token0Route,
+            RouteFinderLib.SwapRoute memory token1Route,
+            RouteFinderLib.RouteStatus status
+        ) = routeFinder.findRoutesForPositionOpen(token0, token1, pool, tickSpacing);
+        
+        // Check if routes were found
+        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
+            revert InvalidRoute();
+        }
+        
+        // Create position parameters with discovered routes
+        PositionParams memory params = PositionParams({
+            pool: pool,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            deadline: deadline,
+            usdcAmount: usdcAmount,
+            slippageBps: slippageBps,
+            stake: stake,
+            token0Route: SwapRoute({
+                pools: token0Route.pools,
+                tokens: token0Route.tokens,
+                tickSpacings: token0Route.tickSpacings
+            }),
+            token1Route: SwapRoute({
+                pools: token1Route.pools,
+                tokens: token1Route.tokens,
+                tickSpacings: token1Route.tickSpacings
+            })
+        });
+        
+        // Use existing createPosition logic
+        return _createPosition(params);
+    }
+
+    /**
+     * @notice Creates a new concentrated liquidity position with explicit tick boundaries
+     * @param pool Target pool address
+     * @param tickLower Lower tick boundary
+     * @param tickUpper Upper tick boundary
+     * @param deadline Transaction deadline
+     * @param usdcAmount USDC amount to invest
+     * @param slippageBps Slippage tolerance in basis points
+     * @param stake Whether to stake in gauge
+     * @return tokenId The NFT token ID of the created position
+     * @return liquidity The amount of liquidity minted
+     * @dev For advanced users who need precise tick control
+     */
+    function createPositionWithTicks(
         address pool,
         int24 tickLower,
         int24 tickUpper,
@@ -1194,6 +1275,72 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      */
     function getStakedPositions(address owner) external view returns (uint256[] memory positionIds) {
         return ownerPositionIds[owner];
+    }
+
+    /**
+     * @notice Calculates tick range from percentage
+     * @param currentTick Current pool tick
+     * @param rangePercentage Range percentage in basis points (500 = 5%)
+     * @param tickSpacing Pool's tick spacing requirement
+     * @return tickLower Aligned lower tick
+     * @return tickUpper Aligned upper tick
+     */
+    function calculateTicksFromPercentage(
+        int24 currentTick,
+        uint256 rangePercentage,
+        int24 tickSpacing
+    ) public pure returns (int24 tickLower, int24 tickUpper) {
+        // Calculate tick delta for the percentage range
+        // Using approximation: tickDelta ≈ percentage * 100
+        // This is based on: tick = log₁.₀₀₀₁(price), so for X% price change:
+        // tickDelta ≈ log₁.₀₀₀₁(1 + X/100) ≈ (X/100) * 10000 = X * 100
+        int24 tickDelta = int24(uint24(rangePercentage * 100));
+        
+        // Calculate raw ticks
+        int24 rawTickLower = currentTick - tickDelta;
+        int24 rawTickUpper = currentTick + tickDelta;
+        
+        // Align to tick spacing
+        // For lower tick: round down to nearest multiple of tickSpacing
+        if (rawTickLower >= 0) {
+            tickLower = (rawTickLower / tickSpacing) * tickSpacing;
+        } else {
+            // For negative numbers, we need to round down (more negative)
+            tickLower = ((rawTickLower - tickSpacing + 1) / tickSpacing) * tickSpacing;
+        }
+        
+        // For upper tick: round up to nearest multiple of tickSpacing
+        if (rawTickUpper >= 0) {
+            // Round up for positive numbers
+            if (rawTickUpper % tickSpacing == 0) {
+                tickUpper = rawTickUpper;
+            } else {
+                tickUpper = ((rawTickUpper / tickSpacing) + 1) * tickSpacing;
+            }
+        } else {
+            // For negative numbers, round up means towards zero
+            tickUpper = (rawTickUpper / tickSpacing) * tickSpacing;
+        }
+        
+        // Ensure ticks are within valid range
+        int24 MIN_TICK = -887272;
+        int24 MAX_TICK_INT24 = 887272;
+        
+        if (tickLower < MIN_TICK) {
+            // Align MIN_TICK to tick spacing when used as boundary
+            tickLower = (MIN_TICK / tickSpacing) * tickSpacing;
+        }
+        if (tickUpper > MAX_TICK_INT24) {
+            // Align MAX_TICK to tick spacing when used as boundary
+            tickUpper = (MAX_TICK_INT24 / tickSpacing) * tickSpacing;
+        }
+        
+        // Ensure minimum range (at least one tick spacing)
+        if (tickUpper <= tickLower) {
+            tickUpper = tickLower + tickSpacing;
+        }
+        
+        return (tickLower, tickUpper);
     }
 
     function _calculateMinimumOutput(
