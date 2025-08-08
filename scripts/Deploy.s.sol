@@ -5,10 +5,11 @@ import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
 import { LiquidityManager } from "../contracts/LiquidityManager.sol";
 import { WalletRegistry } from "../contracts/WalletRegistry.sol";
+import { RouteFinder } from "../contracts/RouteFinder.sol";
 
 /**
  * @title Deploy
- * @notice Deployment script for LiquidityManager and WalletRegistry contracts
+ * @notice Deployment script for LiquidityManager, WalletRegistry, and RouteFinder contracts
  * @dev Deploy with: forge script scripts/Deploy.s.sol:Deploy --rpc-url $BASE_RPC_URL --broadcast --verify
  */
 contract Deploy is Script {
@@ -29,7 +30,7 @@ contract Deploy is Script {
         // Note: Setup logic moved to run() function for pure compatibility
     }
 
-    function run() public returns (address liquidityManager, address walletRegistry) {
+    function run() public returns (address liquidityManager, address walletRegistry, address routeFinder) {
         // Get deployer private key from environment
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
@@ -40,6 +41,10 @@ contract Deploy is Script {
         console.log("========================================");
 
         vm.startBroadcast(deployerPrivateKey);
+
+        // Deploy RouteFinder first (always deployed for automatic route discovery)
+        routeFinder = address(new RouteFinder());
+        console.log("RouteFinder deployed at:", routeFinder);
 
         if (USE_WALLET_REGISTRY) {
             // Deploy WalletRegistry first
@@ -58,13 +63,13 @@ contract Deploy is Script {
                 console.log("Added", initialWallets.length, "authorized wallets");
             }
 
-            // Deploy LiquidityManager with WalletRegistry
-            liquidityManager = address(new LiquidityManager(walletRegistry));
+            // Deploy LiquidityManager with WalletRegistry and RouteFinder
+            liquidityManager = address(new LiquidityManager(walletRegistry, routeFinder));
             console.log("LiquidityManager deployed at:", liquidityManager);
             console.log("Access control: ENABLED via WalletRegistry");
         } else {
-            // Deploy LiquidityManager without access control (permissionless)
-            liquidityManager = address(new LiquidityManager(address(0)));
+            // Deploy LiquidityManager without access control (permissionless) but with RouteFinder
+            liquidityManager = address(new LiquidityManager(address(0), routeFinder));
             console.log("LiquidityManager deployed at:", liquidityManager);
             console.log("Access control: DISABLED (permissionless)");
             walletRegistry = address(0);
@@ -77,14 +82,15 @@ contract Deploy is Script {
         console.log("========================================");
 
         // Print deployment summary
-        _printDeploymentSummary(liquidityManager, walletRegistry);
+        _printDeploymentSummary(liquidityManager, walletRegistry, routeFinder);
 
-        return (liquidityManager, walletRegistry);
+        return (liquidityManager, walletRegistry, routeFinder);
     }
 
-    function _printDeploymentSummary(address liquidityManager, address walletRegistry) internal view {
+    function _printDeploymentSummary(address liquidityManager, address walletRegistry, address routeFinder) internal view {
         console.log("\n=== DEPLOYMENT SUMMARY ===");
         console.log("LiquidityManager:", liquidityManager);
+        console.log("RouteFinder:", routeFinder);
 
         if (walletRegistry != address(0)) {
             console.log("WalletRegistry:", walletRegistry);
@@ -121,6 +127,12 @@ contract Deploy is Script {
             liquidityManager,
             "<amount>"
         );
-        console.log("3. Create positions via LiquidityManager.createPosition()");
+        console.log("3. Create positions via LiquidityManager.createPosition() - routes are discovered automatically!");
+        console.log("\n=== ROUTE FINDER FEATURES ===");
+        console.log("- Automatic route discovery for any token pair");
+        console.log("- Gas-efficient caching of pool lookups");
+        console.log("- Multi-hop routing through connector tokens (WETH, cbBTC)");
+        console.log("- Supports tick spacings: 1, 10, 50, 100, 200, 2000");
+        console.log("- No need to manually specify swap routes - it's all automatic!");
     }
 }
