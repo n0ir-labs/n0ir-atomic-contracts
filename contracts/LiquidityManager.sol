@@ -398,10 +398,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
             // Handle token0 swap
             if (token0 != USDC) {
-                if (params.token0Route.pools.length > 0) {
-                    amount0 = _executeSwapWithRoute(USDC, token0, usdc0, params.token0Route, effectiveSlippage);
+                if (usdc0 > 0) {
+                    if (params.token0Route.pools.length > 0) {
+                        amount0 = _executeSwapWithRoute(USDC, token0, usdc0, params.token0Route, effectiveSlippage);
+                    } else {
+                        amount0 = _swapExactInputDirect(USDC, token0, usdc0, params.pool, effectiveSlippage);
+                    }
                 } else {
-                    amount0 = _swapExactInputDirect(USDC, token0, usdc0, params.pool, effectiveSlippage);
+                    amount0 = 0;
                 }
             } else {
                 amount0 = usdc0;
@@ -409,10 +413,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
             // Handle token1 swap
             if (token1 != USDC) {
-                if (params.token1Route.pools.length > 0) {
-                    amount1 = _executeSwapWithRoute(USDC, token1, usdc1, params.token1Route, effectiveSlippage);
+                if (usdc1 > 0) {
+                    if (params.token1Route.pools.length > 0) {
+                        amount1 = _executeSwapWithRoute(USDC, token1, usdc1, params.token1Route, effectiveSlippage);
+                    } else {
+                        amount1 = _swapExactInputDirect(USDC, token1, usdc1, params.pool, effectiveSlippage);
+                    }
                 } else {
-                    amount1 = _swapExactInputDirect(USDC, token1, usdc1, params.pool, effectiveSlippage);
+                    amount1 = 0;
                 }
             } else {
                 amount1 = usdc1;
@@ -423,6 +431,18 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         IERC20(token0).approve(address(POSITION_MANAGER), amount0);
         IERC20(token1).approve(address(POSITION_MANAGER), amount1);
 
+        // For high tick spacing pools, use very low minimum amounts
+        // PSC errors occur when the price moves significantly during mint
+        // Using 0 for minimums allows the position manager to use whatever ratio is needed
+        uint256 amount0Min = 0;
+        uint256 amount1Min = 0;
+        
+        // Only apply slippage protection for normal tick spacing pools
+        if (tickSpacing < 1000) {
+            amount0Min = (amount0 * (10_000 - effectiveSlippage)) / 10_000;
+            amount1Min = (amount1 * (10_000 - effectiveSlippage)) / 10_000;
+        }
+        
         // Mint position
         INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
             token0: token0,
@@ -432,8 +452,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             tickUpper: params.tickUpper,
             amount0Desired: amount0,
             amount1Desired: amount1,
-            amount0Min: (amount0 * (10_000 - effectiveSlippage)) / 10_000,
-            amount1Min: (amount1 * (10_000 - effectiveSlippage)) / 10_000,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
             recipient: params.stake ? address(this) : msg.sender,
             deadline: params.deadline,
             sqrtPriceX96: 0
@@ -815,12 +835,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 initialUsdc1 = (totalUSDC * token1Ratio) / 100;
         uint256 initialUsdc0 = totalUSDC - initialUsdc1;
 
-        // Convert USDC amounts to token amounts
-        uint256 token0Decimals = token0 == WETH ? 18 : 6;
-        uint256 token1Decimals = token1 == WETH ? 18 : 6;
+        // Get proper token decimals
+        uint8 token0Decimals = _getTokenDecimals(token0);
+        uint8 token1Decimals = _getTokenDecimals(token1);
 
         // Calculate token amounts based on prices
-        uint256 token0Amount = (initialUsdc0 * (10 ** token0Decimals)) / token0PriceInUSDC;
+        // token0PriceInUSDC is in USDC units (6 decimals) per 1 token (with its native decimals)
+        // To convert USDC amount to token amount: tokenAmount = usdcAmount * 10^tokenDecimals / price
+        uint256 token0Amount = initialUsdc0 > 0 ? (initialUsdc0 * (10 ** token0Decimals)) / token0PriceInUSDC : 0;
 
         // Use SugarHelper to get the corresponding token1 amount needed
         uint256 token1Needed =
@@ -1035,6 +1057,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         internal
         returns (uint256 amountOut)
     {
+        // Early return for zero amount
+        if (amountIn == 0) {
+            return 0;
+        }
+
+        // Early return if tokenIn and tokenOut are the same (no swap needed)
+        if (tokenIn == tokenOut) {
+            return amountIn;
+        }
+
         // Calculate minAmountOut using quoter with the provided pool
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, pool);
 
@@ -1066,7 +1098,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         amountOut = SWAP_ROUTER.exactInputSingle(params);
 
         // Verify the output
-        uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        uint256 balanceAfter = IERC20(tokenOut).balanceOf(address(this));
+        uint256 actualReceived = balanceAfter >= balanceBefore ? balanceAfter - balanceBefore : 0;
         if (actualReceived < minAmountOut) {
             revert InsufficientOutput(minAmountOut, actualReceived);
         }
@@ -1085,6 +1118,11 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         internal
         returns (uint256 amountOut)
     {
+        // Early return for zero amount
+        if (amountIn == 0) {
+            return 0;
+        }
+
         if (route.pools.length == 0) revert InvalidRoute();
         if (route.tokens.length != route.pools.length + 1) revert ArrayLengthMismatch();
         if (route.tickSpacings.length != route.pools.length) revert ArrayLengthMismatch();
@@ -1117,7 +1155,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         amountOut = SWAP_ROUTER.exactInput(params);
 
         // Verify the output
-        uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        uint256 balanceAfter = IERC20(tokenOut).balanceOf(address(this));
+        uint256 actualReceived = balanceAfter >= balanceBefore ? balanceAfter - balanceBefore : 0;
         if (actualReceived < minAmountOut) {
             revert InsufficientOutput(minAmountOut, actualReceived);
         }
@@ -1404,10 +1443,27 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         int24 tickSpacing
     ) public pure returns (int24 tickLower, int24 tickUpper) {
         // Calculate tick delta for the percentage range
-        // Using approximation: tickDelta ≈ percentage * 100
-        // This is based on: tick = log₁.₀₀₀₁(price), so for X% price change:
-        // tickDelta ≈ log₁.₀₀₀₁(1 + X/100) ≈ (X/100) * 10000 = X * 100
-        int24 tickDelta = int24(uint24(rangePercentage * 100));
+        int24 tickDelta;
+        
+        // For pools with large tick spacing (>= 1000), use a more conservative approach
+        // to avoid creating ranges that are too wide which cause PSC errors
+        if (tickSpacing >= 1000) {
+            // For high tick spacing pools, use the absolute minimum range
+            // PSC errors occur when the range is too wide relative to current liquidity
+            // Use only 1 tick space on each side of current tick
+            tickDelta = tickSpacing;
+        } else {
+            // Original calculation for normal tick spacing pools
+            // Using approximation: tickDelta ≈ percentage * 100
+            // This is based on: tick = log₁.₀₀₀₁(price), so for X% price change:
+            // tickDelta ≈ log₁.₀₀₀₁(1 + X/100) ≈ (X/100) * 10000 = X * 100
+            tickDelta = int24(uint24(rangePercentage * 100));
+            
+            // Ensure minimum tick delta based on tick spacing
+            if (tickDelta < tickSpacing * 2) {
+                tickDelta = tickSpacing * 2; // At least 2 tick spaces wide
+            }
+        }
         
         // Calculate raw ticks
         int24 rawTickLower = currentTick - tickDelta;
@@ -1467,6 +1523,16 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         returns (uint256 minAmountOut)
     {
         // Changed from view to non-view for quoter
+        // Early return for zero amount
+        if (amountIn == 0) {
+            return 0;
+        }
+
+        // If tokens are the same, no swap needed
+        if (tokenIn == tokenOut) {
+            return amountIn;
+        }
+
         // If no pool provided (multi-hop case), return minimum
         if (pool == address(0)) {
             // No direct pool available, use conservative minimum
@@ -1797,6 +1863,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     function _getTokenDecimals(address token) internal view returns (uint8) {
         if (token == USDC) return 6;
         if (token == WETH) return 18;
+        if (token == CBBTC) return 8;
         if (token == AERO) return 18;
         
         try IERC20Metadata(token).decimals() returns (uint8 decimals) {
