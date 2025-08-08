@@ -74,23 +74,19 @@ contract AutoRoutingIntegrationTest is Test {
     function testCreatePositionAuto_USDC_WETH() public {
         // Find USDC/WETH pool
         address pool = _findPool(USDC, WETH);
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
         
-        // Create position around current price
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         
         // Approve USDC to LiquidityManager
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
-        // Create position with auto-routing (now the default)
+        // Create position with auto-routing and percentage range
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
             100, // 1% slippage
@@ -111,12 +107,9 @@ contract AutoRoutingIntegrationTest is Test {
     function testCreatePositionAuto_WithStaking() public {
         // Find USDC/WETH pool
         address pool = _findPool(USDC, WETH);
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
         
-        // Create position around current price
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         
@@ -126,8 +119,7 @@ contract AutoRoutingIntegrationTest is Test {
         // Create position with staking
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
             100, // 1% slippage
@@ -156,12 +148,8 @@ contract AutoRoutingIntegrationTest is Test {
             return;
         }
         
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
-        
-        // Create position around current price
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         
@@ -171,8 +159,7 @@ contract AutoRoutingIntegrationTest is Test {
         // Create position with auto-routing
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             500e6, // 500 USDC
             200, // 2% slippage for complex route
@@ -191,11 +178,9 @@ contract AutoRoutingIntegrationTest is Test {
     function testClosePositionAuto() public {
         // First create a position
         address pool = _findPool(USDC, WETH);
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
         
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         
@@ -204,8 +189,7 @@ contract AutoRoutingIntegrationTest is Test {
         
         (uint256 tokenId,) = liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             1000e6,
             100,
@@ -258,7 +242,7 @@ contract AutoRoutingIntegrationTest is Test {
         
         // Should revert with "RouteFinder not configured"
         vm.expectRevert("RouteFinder not configured");
-        noRouteLM.createPosition(
+        noRouteLM.createPositionWithTicks(
             pool,
             tickLower,
             tickUpper,
@@ -273,11 +257,9 @@ contract AutoRoutingIntegrationTest is Test {
     
     function testCreatePositionAuto_InsufficientBalance() public {
         address pool = _findPool(USDC, WETH);
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
         
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         
@@ -287,8 +269,7 @@ contract AutoRoutingIntegrationTest is Test {
         vm.expectRevert();
         liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             100000e6, // 100,000 USDC (more than user has)
             100,
@@ -302,11 +283,9 @@ contract AutoRoutingIntegrationTest is Test {
     
     function testGasUsage_AutoVsManual() public {
         address pool = _findPool(USDC, WETH);
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
         
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
+        // Use percentage-based range
+        uint256 rangePercentage = 100; // 1% range
         
         vm.startPrank(testUser);
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
@@ -315,8 +294,7 @@ contract AutoRoutingIntegrationTest is Test {
         uint256 gasStart = gasleft();
         liquidityManager.createPosition(
             pool,
-            tickLower,
-            tickUpper,
+            rangePercentage,
             block.timestamp + 3600,
             100e6,
             100,
