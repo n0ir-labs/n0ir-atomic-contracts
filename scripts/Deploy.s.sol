@@ -127,12 +127,12 @@ contract Deploy is Script {
             liquidityManager,
             "<amount>"
         );
-        console.log("3. Create positions with auto-routing via LiquidityManager.createPositionAuto()");
-        console.log("   Or use manual routes via LiquidityManager.createPosition()");
+        console.log("3. Create positions via LiquidityManager.createPosition() - routes are discovered automatically!");
         console.log("\n=== ROUTE FINDER FEATURES ===");
         console.log("- Automatic route discovery for any token pair");
         console.log("- Gas-efficient caching of pool lookups");
         console.log("- Multi-hop routing through connector tokens (WETH, cbBTC)");
-        console.log("- No need to manually specify swap routes");
+        console.log("- Supports tick spacings: 1, 10, 50, 100, 200, 2000");
+        console.log("- No need to manually specify swap routes - it's all automatic!");
     }
 }

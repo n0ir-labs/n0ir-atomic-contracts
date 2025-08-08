@@ -109,6 +109,7 @@ contract RouteFinder is Ownable {
         tickSpacings.push(50);
         tickSpacings.push(100);
         tickSpacings.push(200);
+        tickSpacings.push(2000);
         
         // Initialize default connector tokens
         connectorTokens.push(WETH);

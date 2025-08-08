@@ -134,7 +134,7 @@ library RouteFinderLib {
         // Check tick spacings are valid (common values)
         for (uint256 i = 0; i < route.tickSpacings.length; i++) {
             int24 ts = route.tickSpacings[i];
-            if (ts != 1 && ts != 10 && ts != 50 && ts != 100 && ts != 200 && ts != 500) {
+            if (ts != 1 && ts != 10 && ts != 50 && ts != 100 && ts != 200 && ts != 2000) {
                 return false;
             }
         }
@@ -272,6 +272,6 @@ library RouteFinderLib {
             || tickSpacing == 50 
             || tickSpacing == 100 
             || tickSpacing == 200 
-            || tickSpacing == 500;
+            || tickSpacing == 2000;
     }
 }

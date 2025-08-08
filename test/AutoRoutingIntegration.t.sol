@@ -86,8 +86,8 @@ contract AutoRoutingIntegrationTest is Test {
         // Approve USDC to LiquidityManager
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
-        // Create position with auto-routing
-        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPositionAuto(
+        // Create position with auto-routing (now the default)
+        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -124,7 +124,7 @@ contract AutoRoutingIntegrationTest is Test {
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
         // Create position with staking
-        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPositionAuto(
+        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -169,7 +169,7 @@ contract AutoRoutingIntegrationTest is Test {
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
         // Create position with auto-routing
-        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPositionAuto(
+        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -202,7 +202,7 @@ contract AutoRoutingIntegrationTest is Test {
         // Approve and create position
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
-        (uint256 tokenId,) = liquidityManager.createPositionAuto(
+        (uint256 tokenId,) = liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -218,8 +218,8 @@ contract AutoRoutingIntegrationTest is Test {
         // Record USDC balance before closing
         uint256 usdcBefore = IERC20(USDC).balanceOf(testUser);
         
-        // Close position with auto-routing
-        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePositionAuto(
+        // Close position with auto-routing (now the default)
+        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePosition(
             tokenId,
             pool,
             block.timestamp + 3600,
@@ -258,7 +258,7 @@ contract AutoRoutingIntegrationTest is Test {
         
         // Should revert with "RouteFinder not configured"
         vm.expectRevert("RouteFinder not configured");
-        noRouteLM.createPositionAuto(
+        noRouteLM.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -285,7 +285,7 @@ contract AutoRoutingIntegrationTest is Test {
         
         // Try to create position with more USDC than user has
         vm.expectRevert();
-        liquidityManager.createPositionAuto(
+        liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -313,7 +313,7 @@ contract AutoRoutingIntegrationTest is Test {
         
         // Measure gas for auto-routing
         uint256 gasStart = gasleft();
-        liquidityManager.createPositionAuto(
+        liquidityManager.createPosition(
             pool,
             tickLower,
             tickUpper,
@@ -339,65 +339,5 @@ contract AutoRoutingIntegrationTest is Test {
     
     // ============ Integration with Existing Functions ============
     
-    function testBackwardCompatibility() public {
-        // Verify that old functions still work
-        address pool = _findPool(USDC, WETH);
-        ICLPool clPool = ICLPool(pool);
-        address token0 = clPool.token0();
-        address token1 = clPool.token1();
-        int24 currentTick = _getCurrentTick(pool);
-        int24 tickSpacing = _getTickSpacing(pool);
-        
-        int24 tickLower = (currentTick - 1000) / tickSpacing * tickSpacing;
-        int24 tickUpper = (currentTick + 1000) / tickSpacing * tickSpacing;
-        
-        // Construct manual routes
-        LiquidityManager.SwapRoute memory token0Route;
-        LiquidityManager.SwapRoute memory token1Route;
-        
-        if (token0 == USDC) {
-            // Only need route for token1
-            token1Route.pools = new address[](1);
-            token1Route.tokens = new address[](2);
-            token1Route.tickSpacings = new int24[](1);
-            
-            token1Route.pools[0] = pool;
-            token1Route.tokens[0] = USDC;
-            token1Route.tokens[1] = token1;
-            token1Route.tickSpacings[0] = tickSpacing;
-        } else {
-            // Only need route for token0
-            token0Route.pools = new address[](1);
-            token0Route.tokens = new address[](2);
-            token0Route.tickSpacings = new int24[](1);
-            
-            token0Route.pools[0] = pool;
-            token0Route.tokens[0] = USDC;
-            token0Route.tokens[1] = token0;
-            token0Route.tickSpacings[0] = tickSpacing;
-        }
-        
-        LiquidityManager.PositionParams memory params = LiquidityManager.PositionParams({
-            pool: pool,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            deadline: block.timestamp + 3600,
-            usdcAmount: 100e6,
-            slippageBps: 100,
-            stake: false,
-            token0Route: token0Route,
-            token1Route: token1Route
-        });
-        
-        vm.startPrank(testUser);
-        IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
-        
-        // Old function should still work
-        (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(params);
-        
-        vm.stopPrank();
-        
-        assertTrue(tokenId > 0, "Token ID should be positive");
-        assertTrue(liquidity > 0, "Liquidity should be positive");
-    }
+    // Removed testBackwardCompatibility since manual functions are deprecated
 }

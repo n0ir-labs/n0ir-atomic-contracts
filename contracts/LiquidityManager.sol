@@ -188,20 +188,76 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     // ============ External Functions ============
 
     /**
-     * @notice Creates a new concentrated liquidity position
-     * @param params Position creation parameters
+     * @notice Creates a new concentrated liquidity position with automatic route discovery
+     * @param pool Target pool address
+     * @param tickLower Lower tick boundary
+     * @param tickUpper Upper tick boundary  
+     * @param deadline Transaction deadline
+     * @param usdcAmount USDC amount to invest
+     * @param slippageBps Slippage tolerance in basis points
+     * @param stake Whether to stake in gauge
      * @return tokenId The NFT token ID of the created position
      * @return liquidity The amount of liquidity minted
-     * @dev Performs atomic swap, mint, and optional stake operations
+     * @dev Automatically discovers optimal swap routes using RouteFinder
      */
-    function createPosition(PositionParams calldata params)
+    function createPosition(
+        address pool,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 deadline,
+        uint256 usdcAmount,
+        uint256 slippageBps,
+        bool stake
+    )
         external
         nonReentrant
-        deadlineCheck(params.deadline)
-        validAmount(params.usdcAmount)
+        deadlineCheck(deadline)
+        validAmount(usdcAmount)
         onlyAuthorized(msg.sender)
         returns (uint256 tokenId, uint128 liquidity)
     {
+        require(address(routeFinder) != address(0), "RouteFinder not configured");
+        
+        // Get pool info
+        ICLPool clPool = ICLPool(pool);
+        address token0 = clPool.token0();
+        address token1 = clPool.token1();
+        int24 tickSpacing = clPool.tickSpacing();
+        
+        // Find routes automatically
+        (
+            RouteFinderLib.SwapRoute memory token0Route,
+            RouteFinderLib.SwapRoute memory token1Route,
+            RouteFinderLib.RouteStatus status
+        ) = routeFinder.findRoutesForPositionOpen(token0, token1, pool, tickSpacing);
+        
+        // Check if routes were found
+        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
+            revert InvalidRoute();
+        }
+        
+        // Create position parameters with discovered routes
+        PositionParams memory params = PositionParams({
+            pool: pool,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            deadline: deadline,
+            usdcAmount: usdcAmount,
+            slippageBps: slippageBps,
+            stake: stake,
+            token0Route: SwapRoute({
+                pools: token0Route.pools,
+                tokens: token0Route.tokens,
+                tickSpacings: token0Route.tickSpacings
+            }),
+            token1Route: SwapRoute({
+                pools: token1Route.pools,
+                tokens: token1Route.tokens,
+                tickSpacings: token1Route.tickSpacings
+            })
+        });
+        
+        // Use existing createPosition logic
         return _createPosition(params);
     }
 
@@ -308,19 +364,68 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
 
     /**
-     * @notice Closes an existing position and returns USDC
-     * @param params Exit parameters including tokenId and routes
+     * @notice Closes a position with automatic route discovery
+     * @param tokenId Position NFT token ID
+     * @param pool Pool address
+     * @param deadline Transaction deadline
+     * @param minUsdcOut Minimum USDC to receive
+     * @param slippageBps Slippage tolerance in basis points
      * @return usdcOut Amount of USDC returned to user
      * @return aeroRewards Amount of AERO rewards claimed
-     * @dev Handles both staked and unstaked positions
+     * @dev Automatically discovers optimal swap routes using RouteFinder
      */
-    function closePosition(ExitParams calldata params)
+    function closePosition(
+        uint256 tokenId,
+        address pool,
+        uint256 deadline,
+        uint256 minUsdcOut,
+        uint256 slippageBps
+    )
         external
         nonReentrant
-        deadlineCheck(params.deadline)
+        deadlineCheck(deadline)
         onlyAuthorized(msg.sender)
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
+        require(address(routeFinder) != address(0), "RouteFinder not configured");
+        
+        // Get pool info
+        ICLPool clPool = ICLPool(pool);
+        address token0 = clPool.token0();
+        address token1 = clPool.token1();
+        
+        // Find routes automatically
+        (
+            RouteFinderLib.SwapRoute memory token0Route,
+            RouteFinderLib.SwapRoute memory token1Route,
+            RouteFinderLib.RouteStatus status
+        ) = routeFinder.findRoutesForPositionClose(token0, token1);
+        
+        // Check if routes were found (at least partial success needed)
+        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
+            revert InvalidRoute();
+        }
+        
+        // Create exit parameters with discovered routes
+        ExitParams memory params = ExitParams({
+            tokenId: tokenId,
+            pool: pool,
+            deadline: deadline,
+            minUsdcOut: minUsdcOut,
+            slippageBps: slippageBps,
+            token0Route: SwapRoute({
+                pools: token0Route.pools,
+                tokens: token0Route.tokens,
+                tickSpacings: token0Route.tickSpacings
+            }),
+            token1Route: SwapRoute({
+                pools: token1Route.pools,
+                tokens: token1Route.tokens,
+                tickSpacings: token1Route.tickSpacings
+            })
+        });
+        
+        // Use existing closePosition logic
         return _closePosition(params);
     }
 
@@ -432,146 +537,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
 
         emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
-    }
-
-    /**
-     * @notice Creates a new position with automatic route discovery
-     * @param pool Target pool address
-     * @param tickLower Lower tick boundary
-     * @param tickUpper Upper tick boundary
-     * @param deadline Transaction deadline
-     * @param usdcAmount USDC amount to invest
-     * @param slippageBps Slippage tolerance in basis points
-     * @param stake Whether to stake in gauge
-     * @return tokenId The NFT token ID of the created position
-     * @return liquidity The amount of liquidity minted
-     * @dev Automatically discovers optimal swap routes using RouteFinder
-     */
-    function createPositionAuto(
-        address pool,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 deadline,
-        uint256 usdcAmount,
-        uint256 slippageBps,
-        bool stake
-    )
-        external
-        nonReentrant
-        deadlineCheck(deadline)
-        validAmount(usdcAmount)
-        onlyAuthorized(msg.sender)
-        returns (uint256 tokenId, uint128 liquidity)
-    {
-        require(address(routeFinder) != address(0), "RouteFinder not configured");
-        
-        // Get pool info
-        ICLPool clPool = ICLPool(pool);
-        address token0 = clPool.token0();
-        address token1 = clPool.token1();
-        int24 tickSpacing = clPool.tickSpacing();
-        
-        // Find routes automatically
-        (
-            RouteFinderLib.SwapRoute memory token0Route,
-            RouteFinderLib.SwapRoute memory token1Route,
-            RouteFinderLib.RouteStatus status
-        ) = routeFinder.findRoutesForPositionOpen(token0, token1, pool, tickSpacing);
-        
-        // Check if routes were found
-        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
-            revert InvalidRoute();
-        }
-        
-        // Create position parameters with discovered routes
-        PositionParams memory params = PositionParams({
-            pool: pool,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            deadline: deadline,
-            usdcAmount: usdcAmount,
-            slippageBps: slippageBps,
-            stake: stake,
-            token0Route: SwapRoute({
-                pools: token0Route.pools,
-                tokens: token0Route.tokens,
-                tickSpacings: token0Route.tickSpacings
-            }),
-            token1Route: SwapRoute({
-                pools: token1Route.pools,
-                tokens: token1Route.tokens,
-                tickSpacings: token1Route.tickSpacings
-            })
-        });
-        
-        // Use existing createPosition logic
-        return _createPosition(params);
-    }
-
-    /**
-     * @notice Closes a position with automatic route discovery
-     * @param tokenId Position NFT token ID
-     * @param pool Pool address
-     * @param deadline Transaction deadline
-     * @param minUsdcOut Minimum USDC to receive
-     * @param slippageBps Slippage tolerance in basis points
-     * @return usdcOut Amount of USDC returned to user
-     * @return aeroRewards Amount of AERO rewards claimed
-     * @dev Automatically discovers optimal swap routes using RouteFinder
-     */
-    function closePositionAuto(
-        uint256 tokenId,
-        address pool,
-        uint256 deadline,
-        uint256 minUsdcOut,
-        uint256 slippageBps
-    )
-        external
-        nonReentrant
-        deadlineCheck(deadline)
-        onlyAuthorized(msg.sender)
-        returns (uint256 usdcOut, uint256 aeroRewards)
-    {
-        require(address(routeFinder) != address(0), "RouteFinder not configured");
-        
-        // Get pool info
-        ICLPool clPool = ICLPool(pool);
-        address token0 = clPool.token0();
-        address token1 = clPool.token1();
-        
-        // Find routes automatically
-        (
-            RouteFinderLib.SwapRoute memory token0Route,
-            RouteFinderLib.SwapRoute memory token1Route,
-            RouteFinderLib.RouteStatus status
-        ) = routeFinder.findRoutesForPositionClose(token0, token1);
-        
-        // Check if routes were found (at least partial success needed)
-        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
-            revert InvalidRoute();
-        }
-        
-        // Create exit parameters with discovered routes
-        ExitParams memory params = ExitParams({
-            tokenId: tokenId,
-            pool: pool,
-            deadline: deadline,
-            minUsdcOut: minUsdcOut,
-            slippageBps: slippageBps,
-            token0Route: SwapRoute({
-                pools: token0Route.pools,
-                tokens: token0Route.tokens,
-                tickSpacings: token0Route.tickSpacings
-            }),
-            token1Route: SwapRoute({
-                pools: token1Route.pools,
-                tokens: token1Route.tokens,
-                tickSpacings: token1Route.tickSpacings
-            })
-        });
-        
-        // Use existing closePosition logic
-        return _closePosition(params);
     }
 
     // ============ Public View Functions ============
