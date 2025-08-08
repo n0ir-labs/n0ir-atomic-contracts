@@ -18,7 +18,7 @@ contract StakedPositionsTest is Test {
 
     function setUp() public {
         vm.createSelectFork("https://mainnet.base.org");
-        liquidityManager = new LiquidityManager(address(0));
+        liquidityManager = new LiquidityManager(address(0), address(0));
         vm.makePersistent(address(liquidityManager));
 
         user1 = makeAddr("user1");

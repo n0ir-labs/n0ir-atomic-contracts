@@ -22,7 +22,7 @@ contract SequentialRoutingTest is Test {
     function setUp() public {
         vm.createSelectFork("https://mainnet.base.org");
         // Deploy new instance of LiquidityManager with zero address for wallet registry (testing)
-        liquidityManager = new LiquidityManager(address(0));
+        liquidityManager = new LiquidityManager(address(0), address(0));
         // Make the contract persistent across pranks
         vm.makePersistent(address(liquidityManager));
     }
