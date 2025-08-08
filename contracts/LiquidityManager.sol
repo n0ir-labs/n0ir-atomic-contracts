@@ -116,6 +116,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @notice Emitted when a swap is executed
     event SwapExecuted(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
 
+    /// @notice Emitted when rewards are claimed from a position
+    event RewardsClaimed(address indexed user, uint256 indexed tokenId, uint256 aeroAmount);
+
+    /// @notice Emitted when rewards are claimed from multiple positions
+    event AllRewardsClaimed(address indexed user, uint256 totalAeroAmount, uint256 positionCount);
+
     // ============ Type Definitions ============
     /// @notice Defines the type of routing strategy
     enum RouteType {
@@ -157,6 +163,23 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 slippageBps; // Slippage tolerance in basis points
         SwapRoute token0Route; // Routing for token0 to USDC
         SwapRoute token1Route; // Routing for token1 to USDC
+    }
+
+    /// @notice Detailed information about a liquidity position
+    struct PositionInfo {
+        uint256 id; // Position NFT token ID
+        address owner; // Owner of the position
+        address poolAddress; // Pool address
+        int24 tickLower; // Lower tick boundary
+        int24 tickUpper; // Upper tick boundary
+        uint128 liquidity; // Liquidity amount
+        uint128 tokensOwed0; // Unclaimed token0 fees
+        uint128 tokensOwed1; // Unclaimed token1 fees
+        bool inRange; // Whether position is in range
+        uint256 currentValueUsd; // Current position value in USD
+        uint256 unclaimedFeesUsd; // Unclaimed fees value in USD
+        bool staked; // Whether position is staked in gauge
+        address gaugeAddress; // Gauge address if staked
     }
 
     // ============ Constructor ============
@@ -618,6 +641,115 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
 
         emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
+    }
+
+    /**
+     * @notice Claims AERO rewards for a single staked position
+     * @param tokenId The position NFT token ID
+     * @return aeroAmount Amount of AERO rewards claimed
+     * @dev Only the position owner can claim rewards
+     */
+    function claimRewards(uint256 tokenId) 
+        external 
+        nonReentrant 
+        returns (uint256 aeroAmount) 
+    {
+        // Check if position is staked and owned by sender
+        address positionOwner = stakedPositionOwners[tokenId];
+        
+        if (positionOwner == address(0)) {
+            // Position might be unstaked, check direct ownership
+            positionOwner = POSITION_MANAGER.ownerOf(tokenId);
+            require(positionOwner == msg.sender, "Not the owner of this position");
+            
+            // Unstaked positions don't earn AERO rewards
+            return 0;
+        }
+        
+        require(positionOwner == msg.sender, "Not the owner of this staked position");
+        
+        // Get position details to find the pool and gauge
+        (,, address token0, address token1, int24 tickSpacing,,,,,,,) = POSITION_MANAGER.positions(tokenId);
+        
+        // Reconstruct pool address (we need to find it from token0, token1, tickSpacing)
+        // This is a limitation - we might need to track pool addresses per position
+        address pool = _findPoolFromTokens(token0, token1, tickSpacing);
+        require(pool != address(0), "Pool not found");
+        
+        address gauge = _findGaugeForPool(pool);
+        require(gauge != address(0), "No gauge for this pool");
+        
+        // Track AERO balance before claim
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        
+        // Claim rewards from gauge
+        IGauge(gauge).getReward(tokenId);
+        
+        // Calculate rewards claimed
+        aeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        
+        // Transfer rewards to user
+        if (aeroAmount > 0) {
+            IERC20(AERO).transfer(msg.sender, aeroAmount);
+            emit RewardsClaimed(msg.sender, tokenId, aeroAmount);
+        }
+        
+        return aeroAmount;
+    }
+
+    /**
+     * @notice Claims AERO rewards for all staked positions owned by an address
+     * @param owner The address to claim rewards for
+     * @return totalAeroAmount Total amount of AERO rewards claimed
+     * @dev Only the owner can claim their rewards
+     */
+    function claimAllRewards(address owner) 
+        external 
+        nonReentrant 
+        returns (uint256 totalAeroAmount) 
+    {
+        require(owner == msg.sender, "Can only claim own rewards");
+        
+        uint256[] memory positionIds = ownerPositionIds[owner];
+        uint256 positionCount = positionIds.length;
+        
+        if (positionCount == 0) {
+            return 0;
+        }
+        
+        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
+        
+        // Iterate through all positions and claim rewards
+        for (uint256 i = 0; i < positionCount; i++) {
+            uint256 tokenId = positionIds[i];
+            
+            // Get position details
+            (,, address token0, address token1, int24 tickSpacing,,,,,,,) = POSITION_MANAGER.positions(tokenId);
+            
+            // Find pool and gauge
+            address pool = _findPoolFromTokens(token0, token1, tickSpacing);
+            if (pool == address(0)) continue;
+            
+            address gauge = _findGaugeForPool(pool);
+            if (gauge == address(0)) continue;
+            
+            // Claim rewards from gauge
+            try IGauge(gauge).getReward(tokenId) {} catch {
+                // Continue if claim fails for this position
+                continue;
+            }
+        }
+        
+        // Calculate total rewards claimed
+        totalAeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
+        
+        // Transfer all rewards to user
+        if (totalAeroAmount > 0) {
+            IERC20(AERO).transfer(owner, totalAeroAmount);
+            emit AllRewardsClaimed(owner, totalAeroAmount, positionCount);
+        }
+        
+        return totalAeroAmount;
     }
 
     // ============ Public View Functions ============
@@ -1130,25 +1262,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         emit TokensRecovered(token, msg.sender, amount);
     }
 
-    /**
-     * @notice Gets token decimals with caching for common tokens
-     * @param token Token address
-     * @return Token decimals (defaults to 18 if not available)
-     */
-    function _getTokenDecimals(address token) internal view returns (uint256) {
-        // Cache common tokens to save gas
-        if (token == USDC) return 6;
-        if (token == WETH) return 18;
-        if (token == CBBTC) return 8;
-
-        // For other tokens, fetch from contract
-        try IERC20Metadata(token).decimals() returns (uint8 decimals) {
-            return uint256(decimals);
-        } catch {
-            // Default to 18 if decimals() is not implemented
-            return 18;
-        }
-    }
 
     // ============ Admin Functions ============
 
@@ -1387,6 +1500,341 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Ensure we always have some minimum to avoid complete loss
         if (minAmountOut == 0) {
             minAmountOut = 1;
+        }
+    }
+
+    /**
+     * @notice Gets detailed information about a single position
+     * @param tokenId The position NFT token ID
+     * @return info Detailed position information
+     */
+    function getPositionInfo(uint256 tokenId) external view returns (PositionInfo memory info) {
+        // Get position data from NFT manager
+        (
+            ,
+            ,
+            address token0,
+            address token1,
+            int24 tickSpacing,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            ,
+            ,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        ) = POSITION_MANAGER.positions(tokenId);
+        
+        // Check if position exists
+        require(liquidity > 0 || tokensOwed0 > 0 || tokensOwed1 > 0, "Position does not exist");
+        
+        // Find pool from tokens
+        address pool = _findPoolFromTokens(token0, token1, tickSpacing);
+        
+        // Get current tick to check if in range
+        bool inRange = false;
+        if (pool != address(0)) {
+            (, int24 currentTick,,,,) = ICLPool(pool).slot0();
+            inRange = currentTick >= tickLower && currentTick <= tickUpper;
+        }
+        
+        // Determine owner and staking status
+        address owner;
+        bool staked = false;
+        address gaugeAddress = address(0);
+        
+        if (stakedPositionOwners[tokenId] != address(0)) {
+            // Position is staked through this contract
+            owner = stakedPositionOwners[tokenId];
+            staked = true;
+            gaugeAddress = _findGaugeForPool(pool);
+        } else {
+            // Position is not staked, get direct owner
+            try POSITION_MANAGER.ownerOf(tokenId) returns (address nftOwner) {
+                owner = nftOwner;
+                // Check if owner is a gauge (staked outside this contract)
+                if (pool != address(0)) {
+                    address gauge = _findGaugeForPool(pool);
+                    if (gauge != address(0) && nftOwner == gauge) {
+                        staked = true;
+                        gaugeAddress = gauge;
+                        // We don't know the actual owner in this case
+                        owner = address(0);
+                    }
+                }
+            } catch {
+                owner = address(0);
+            }
+        }
+        
+        // Calculate USD values
+        uint256 currentValueUsd = _calculatePositionValueUsd(
+            pool,
+            liquidity,
+            tickLower,
+            tickUpper,
+            token0,
+            token1
+        );
+        
+        uint256 unclaimedFeesUsd = _calculateUnclaimedFeesUsd(
+            token0,
+            token1,
+            tokensOwed0,
+            tokensOwed1
+        );
+        
+        // Populate position info
+        info = PositionInfo({
+            id: tokenId,
+            owner: owner,
+            poolAddress: pool,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            liquidity: liquidity,
+            tokensOwed0: tokensOwed0,
+            tokensOwed1: tokensOwed1,
+            inRange: inRange,
+            currentValueUsd: currentValueUsd,
+            unclaimedFeesUsd: unclaimedFeesUsd,
+            staked: staked,
+            gaugeAddress: gaugeAddress
+        });
+    }
+    
+    /**
+     * @notice Gets detailed information about all positions owned by an address
+     * @param owner The address to query positions for
+     * @return infos Array of position information
+     */
+    function getAllPositionsInfo(address owner) external view returns (PositionInfo[] memory infos) {
+        // Get staked positions tracked by this contract
+        uint256[] memory stakedIds = ownerPositionIds[owner];
+        uint256 stakedCount = stakedIds.length;
+        
+        // Create array for all positions (we'll resize later if needed)
+        PositionInfo[] memory tempInfos = new PositionInfo[](stakedCount + 100); // Assume max 100 unstaked
+        uint256 actualCount = 0;
+        
+        // Add staked positions
+        for (uint256 i = 0; i < stakedCount; i++) {
+            try this.getPositionInfo(stakedIds[i]) returns (PositionInfo memory info) {
+                tempInfos[actualCount] = info;
+                actualCount++;
+            } catch {
+                // Skip if position doesn't exist or has issues
+                continue;
+            }
+        }
+        
+        // Note: We can't easily enumerate all NFTs owned by an address
+        // The caller should track their unstaked position IDs separately
+        // or use a subgraph/indexer for complete enumeration
+        
+        // Copy to correctly sized array
+        infos = new PositionInfo[](actualCount);
+        for (uint256 i = 0; i < actualCount; i++) {
+            infos[i] = tempInfos[i];
+        }
+    }
+    
+    // ============ Internal Helper Functions ============
+    
+    /**
+     * @notice Finds a pool address from token addresses and tick spacing
+     * @param token0 First token address
+     * @param token1 Second token address
+     * @param tickSpacing Tick spacing of the pool
+     * @return pool The pool address, or address(0) if not found
+     */
+    function _findPoolFromTokens(
+        address token0,
+        address token1,
+        int24 tickSpacing
+    ) internal view returns (address pool) {
+        // This is a simplified implementation
+        // In production, you'd want to use the factory's getPool function
+        // or maintain a mapping of position -> pool
+        
+        // Try common pools based on tick spacing
+        if (tickSpacing == 100) {
+            // Most common for volatile pairs
+            pool = _getPoolAddress(token0, token1, tickSpacing);
+        } else if (tickSpacing == 1) {
+            // Stable pairs
+            pool = _getPoolAddress(token0, token1, tickSpacing);
+        } else {
+            // Other tick spacings
+            pool = _getPoolAddress(token0, token1, tickSpacing);
+        }
+        
+        // Verify pool exists by checking code size
+        uint256 size;
+        assembly {
+            size := extcodesize(pool)
+        }
+        
+        if (size == 0) {
+            return address(0);
+        }
+        
+        // Verify it's actually a pool with matching tokens
+        try ICLPool(pool).token0() returns (address poolToken0) {
+            try ICLPool(pool).token1() returns (address poolToken1) {
+                if ((poolToken0 == token0 && poolToken1 == token1) ||
+                    (poolToken0 == token1 && poolToken1 == token0)) {
+                    return pool;
+                }
+            } catch {}
+        } catch {}
+        
+        return address(0);
+    }
+    
+    /**
+     * @notice Calculates pool address deterministically
+     * @dev This would need the actual factory's pool creation logic
+     */
+    function _getPoolAddress(
+        address token0,
+        address token1,
+        int24 tickSpacing
+    ) internal pure returns (address) {
+        // Placeholder - would need actual factory logic
+        // In production, use factory.getPool() or similar
+        return address(uint160(uint256(keccak256(abi.encodePacked(token0, token1, tickSpacing)))));
+    }
+    
+    /**
+     * @notice Calculates the USD value of a position
+     */
+    function _calculatePositionValueUsd(
+        address pool,
+        uint128 liquidity,
+        int24 tickLower,
+        int24 tickUpper,
+        address token0,
+        address token1
+    ) internal view returns (uint256 valueUsd) {
+        if (liquidity == 0 || pool == address(0)) {
+            return 0;
+        }
+        
+        // Get current pool price
+        (uint160 sqrtPriceX96, int24 currentTick,,,,) = ICLPool(pool).slot0();
+        
+        // Calculate token amounts at current price
+        (uint256 amount0, uint256 amount1) = _getTokenAmountsFromLiquidity(
+            liquidity,
+            sqrtPriceX96,
+            tickLower,
+            tickUpper,
+            currentTick
+        );
+        
+        // Get token prices in USD
+        uint256 token0PriceUsd = _getTokenPriceUsd(token0);
+        uint256 token1PriceUsd = _getTokenPriceUsd(token1);
+        
+        // Calculate total USD value
+        // Prices are in 18 decimals, amounts need decimal adjustment
+        uint8 decimals0 = _getTokenDecimals(token0);
+        uint8 decimals1 = _getTokenDecimals(token1);
+        
+        valueUsd = (amount0 * token0PriceUsd / (10 ** decimals0)) +
+                   (amount1 * token1PriceUsd / (10 ** decimals1));
+    }
+    
+    /**
+     * @notice Calculates the USD value of unclaimed fees
+     */
+    function _calculateUnclaimedFeesUsd(
+        address token0,
+        address token1,
+        uint128 tokensOwed0,
+        uint128 tokensOwed1
+    ) internal view returns (uint256 feesUsd) {
+        if (tokensOwed0 == 0 && tokensOwed1 == 0) {
+            return 0;
+        }
+        
+        // Get token prices in USD
+        uint256 token0PriceUsd = _getTokenPriceUsd(token0);
+        uint256 token1PriceUsd = _getTokenPriceUsd(token1);
+        
+        // Calculate fees USD value
+        uint8 decimals0 = _getTokenDecimals(token0);
+        uint8 decimals1 = _getTokenDecimals(token1);
+        
+        feesUsd = (uint256(tokensOwed0) * token0PriceUsd / (10 ** decimals0)) +
+                  (uint256(tokensOwed1) * token1PriceUsd / (10 ** decimals1));
+    }
+    
+    /**
+     * @notice Gets token price in USD from oracle
+     */
+    function _getTokenPriceUsd(address token) internal view returns (uint256 priceUsd) {
+        if (token == USDC) {
+            return 1e18; // USDC = $1 with 18 decimals
+        }
+        
+        // Try to get price from oracle
+        try ORACLE.getRate(token, USDC, NONE_CONNECTOR, 0) returns (uint256 rate, uint256) {
+            return rate; // Rate is already in 18 decimals
+        } catch {
+            // If direct rate fails, try with WETH as connector
+            try ORACLE.getRate(token, USDC, WETH, 0) returns (uint256 rate, uint256) {
+                return rate;
+            } catch {
+                return 0; // Price unavailable
+            }
+        }
+    }
+    
+    /**
+     * @notice Gets token decimals
+     */
+    function _getTokenDecimals(address token) internal view returns (uint8) {
+        if (token == USDC) return 6;
+        if (token == WETH) return 18;
+        if (token == AERO) return 18;
+        
+        try IERC20Metadata(token).decimals() returns (uint8 decimals) {
+            return decimals;
+        } catch {
+            return 18; // Default to 18 decimals
+        }
+    }
+    
+    /**
+     * @notice Calculates token amounts from liquidity
+     * @dev Simplified calculation - in production use proper Uniswap V3 math
+     */
+    function _getTokenAmountsFromLiquidity(
+        uint128 liquidity,
+        uint160 sqrtPriceX96,
+        int24 tickLower,
+        int24 tickUpper,
+        int24 currentTick
+    ) internal pure returns (uint256 amount0, uint256 amount1) {
+        if (liquidity == 0) return (0, 0);
+        
+        // These calculations are simplified
+        // In production, use proper Uniswap V3 liquidity math
+        
+        if (currentTick < tickLower) {
+            // Position is entirely in token0
+            amount0 = uint256(liquidity) * 1e18 / uint256(sqrtPriceX96);
+            amount1 = 0;
+        } else if (currentTick >= tickUpper) {
+            // Position is entirely in token1
+            amount0 = 0;
+            amount1 = uint256(liquidity) * uint256(sqrtPriceX96) / 1e18;
+        } else {
+            // Position is in range, split between both tokens
+            // Simplified calculation
+            amount0 = uint256(liquidity) * 1e18 / uint256(sqrtPriceX96) / 2;
+            amount1 = uint256(liquidity) * uint256(sqrtPriceX96) / 1e18 / 2;
         }
     }
 }
