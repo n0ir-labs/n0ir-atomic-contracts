@@ -3,8 +3,7 @@ pragma solidity ^0.8.26;
 
 import { WalletRegistry } from "./WalletRegistry.sol";
 import { AtomicBase } from "./AtomicBase.sol";
-import { IUniversalRouter } from "@interfaces/IUniversalRouter.sol";
-import { IPermit2 } from "@interfaces/IPermit2.sol";
+import { ISwapRouter } from "@interfaces/ISwapRouter.sol";
 import { INonfungiblePositionManager } from "@interfaces/INonfungiblePositionManager.sol";
 import { IGauge } from "@interfaces/IGauge.sol";
 import { ICLPool } from "@interfaces/ICLPool.sol";
@@ -54,9 +53,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
     // ============ Constants ============
     /// @notice Core contracts - immutable for gas optimization
-    IUniversalRouter public constant UNIVERSAL_ROUTER = IUniversalRouter(0x01D40099fCD87C018969B0e8D4aB1633Fb34763C);
-    address public constant SWAP_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5; // Fallback router
-    IPermit2 public constant PERMIT2 = IPermit2(0x494bbD8A3302AcA833D307D11838f18DbAdA9C25);
+    ISwapRouter public constant SWAP_ROUTER = ISwapRouter(0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5);
     INonfungiblePositionManager public constant POSITION_MANAGER =
         INonfungiblePositionManager(0x827922686190790b37229fd06084350E74485b72);
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0);
@@ -392,9 +389,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Swap tokens back to USDC with slippage protection
 
         if (token0 != USDC && amount0 > 0) {
-            _approveTokenToPermit2(token0, amount0);
-            _approveUniversalRouterViaPermit2(token0, amount0);
-
             if (params.token0Route.pools.length > 0) {
                 usdcOut += _executeSwapWithRoute(token0, USDC, amount0, params.token0Route, effectiveSlippage);
             } else {
@@ -405,9 +399,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
 
         if (token1 != USDC && amount1 > 0) {
-            _approveTokenToPermit2(token1, amount1);
-            _approveUniversalRouterViaPermit2(token1, amount1);
-
             if (params.token1Route.pools.length > 0) {
                 usdcOut += _executeSwapWithRoute(token1, USDC, amount1, params.token1Route, effectiveSlippage);
             } else {
@@ -693,24 +684,14 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
 
     /**
-     * @notice Approves token to Permit2 contract
+     * @notice Approves token to Swap Router
      * @param token Token address to approve
      * @param amount Amount to approve (uses max if needed)
      */
-    function _approveTokenToPermit2(address token, uint256 amount) internal {
-        if (IERC20(token).allowance(address(this), address(PERMIT2)) < amount) {
-            IERC20(token).approve(address(PERMIT2), type(uint256).max);
+    function _approveTokenToRouter(address token, uint256 amount) internal {
+        if (IERC20(token).allowance(address(this), address(SWAP_ROUTER)) < amount) {
+            IERC20(token).approve(address(SWAP_ROUTER), type(uint256).max);
         }
-    }
-
-    function _approveUniversalRouterViaPermit2(address token, uint256 amount) internal {
-        // First ensure token is approved to Permit2
-        if (IERC20(token).allowance(address(this), address(PERMIT2)) < amount) {
-            IERC20(token).approve(address(PERMIT2), type(uint256).max);
-        }
-
-        // Then approve Universal Router via Permit2 with max amounts
-        PERMIT2.approve(token, address(UNIVERSAL_ROUTER), type(uint160).max, uint48(block.timestamp + 30 days));
     }
 
     function _swapExactInputDirect(
@@ -726,120 +707,32 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // Calculate minAmountOut using quoter with the provided pool
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, pool);
 
-        // Log swap parameters for debugging (remove in production)
-        // _swapExactInputDirect: pool, tokenIn, tokenOut, amountIn, minAmountOut
-
         // Ensure we have the tokens
         if (IERC20(tokenIn).balanceOf(address(this)) < amountIn) {
             revert InsufficientBalance();
         }
 
-        // Get tick spacing to determine which router to use
+        // Get tick spacing from pool
         int24 tickSpacing = ICLPool(pool).tickSpacing();
-        // TickSpacing logged for router selection
 
-        // For pools with tick spacing = 1, use SwapRouter (has correct factory)
-        // For other pools, use Universal Router
-        if (tickSpacing == 1) {
-            // Use SwapRouter for tick spacing = 1 pools (factory compatibility)
-            amountOut = _swapViaSwapRouter(tokenIn, tokenOut, amountIn, tickSpacing, minAmountOut);
-        } else {
-            // Use Universal Router for standard pools
-            // Handle approvals based on token type
-            if (tokenIn != USDC) {
-                // For non-USDC tokens, approve Permit2 if needed
-                _approveTokenToPermit2(tokenIn, amountIn);
-                _approveUniversalRouterViaPermit2(tokenIn, amountIn);
-            } else {
-                // For USDC, use existing approval logic
-                if (IERC20(tokenIn).allowance(address(this), address(PERMIT2)) < amountIn) {
-                    IERC20(tokenIn).approve(address(PERMIT2), type(uint256).max);
-                }
+        // Approve Swap Router to spend our tokens
+        _approveTokenToRouter(tokenIn, amountIn);
 
-                // Then, approve Universal Router on Permit2
-                PERMIT2.approve(
-                    tokenIn,
-                    address(UNIVERSAL_ROUTER),
-                    uint160(amountIn),
-                    uint48(block.timestamp + 3600) // expiration
-                );
-            }
-
-            bytes memory commands = abi.encodePacked(bytes1(0x00)); // V3_SWAP_EXACT_IN
-            bytes[] memory inputs = new bytes[](1);
-
-            // Encode path with tick spacing as int24 (3 bytes)
-            bytes memory path = abi.encodePacked(
-                tokenIn,
-                tickSpacing, // Tick spacing as int24 (3 bytes)
-                tokenOut
-            );
-
-            inputs[0] = abi.encode(
-                address(this), // recipient
-                amountIn, // amountIn
-                minAmountOut, // amountOutMinimum
-                path, // path with tick spacing
-                true, // payerIsUser = true (Universal Router pulls via Permit2)
-                true // useSlipstreamPools = true for Aerodrome V3 CL pools
-            );
-
-            uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
-            UNIVERSAL_ROUTER.execute{ value: 0 }(commands, inputs);
-            amountOut = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
-        }
-
-        if (amountOut < minAmountOut) {
-            revert InsufficientOutput(minAmountOut, amountOut);
-        }
-    }
-
-    function _swapViaSwapRouter(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        int24 tickSpacing,
-        uint256 minAmountOut
-    )
-        internal
-        returns (uint256 amountOut)
-    {
-        // SwapRouter fallback for special pools
-
-        // Approve SwapRouter to spend our tokens
-        if (IERC20(tokenIn).allowance(address(this), SWAP_ROUTER) < amountIn) {
-            IERC20(tokenIn).approve(SWAP_ROUTER, type(uint256).max);
-        }
-
-        // Call exactInputSingle on SwapRouter
-        // The function signature is: exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))
+        // Execute swap using Swap Router
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
 
-        bytes memory callData = abi.encodeWithSelector(
-            bytes4(keccak256("exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))")),
-            tokenIn, // tokenIn
-            tokenOut, // tokenOut
-            tickSpacing, // tickSpacing
-            address(this), // recipient
-            block.timestamp + 300, // deadline
-            amountIn, // amountIn
-            minAmountOut, // amountOutMinimum
-            uint160(0) // sqrtPriceLimitX96 (0 = no limit)
-        );
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            tickSpacing: tickSpacing,
+            recipient: address(this),
+            deadline: block.timestamp + 300,
+            amountIn: amountIn,
+            amountOutMinimum: minAmountOut,
+            sqrtPriceLimitX96: 0
+        });
 
-        (bool success, bytes memory result) = SWAP_ROUTER.call(callData);
-
-        if (!success) {
-            if (result.length > 0) {
-                // Bubble up the revert reason
-                assembly {
-                    revert(add(32, result), mload(result))
-                }
-            }
-            revert SwapFailed();
-        }
-
-        amountOut = abi.decode(result, (uint256));
+        amountOut = SWAP_ROUTER.exactInputSingle(params);
 
         // Verify the output
         uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
@@ -849,6 +742,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         return actualReceived;
     }
+
 
     function _executeSwapWithRoute(
         address tokenIn,
@@ -864,46 +758,40 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (route.tokens.length != route.pools.length + 1) revert ArrayLengthMismatch();
         if (route.tickSpacings.length != route.pools.length) revert ArrayLengthMismatch();
 
-        // Execute swap through specified route
-
         // For single-hop use the pool, for multi-hop pass address(0)
         address poolForQuote = route.pools.length == 1 ? route.pools[0] : address(0);
         uint256 minAmountOut = _calculateMinimumOutput(tokenIn, tokenOut, amountIn, slippageBps, poolForQuote);
-        // MinAmountOut calculated from oracle/quoter
 
         // Single hop swap
         if (route.pools.length == 1) {
-            // Single hop optimization
             return _swapExactInputDirect(route.tokens[0], route.tokens[1], amountIn, route.pools[0], slippageBps);
         }
 
-        // Multi-hop swap - execute each hop sequentially
-        // Note: Sequential execution for complex routes
-        uint256 currentAmount = amountIn;
-        address currentToken = tokenIn;
+        // Multi-hop swap using exactInput with encoded path
+        bytes memory path = _encodeMultihopPath(route);
+        
+        // Approve Swap Router
+        _approveTokenToRouter(tokenIn, amountIn);
 
-        for (uint256 i = 0; i < route.pools.length; i++) {
-            address nextToken = route.tokens[i + 1];
-            address pool = route.pools[i];
+        uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
 
-            // Execute hop i+1 through pool
+        ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
+            path: path,
+            recipient: address(this),
+            deadline: block.timestamp + 300,
+            amountIn: amountIn,
+            amountOutMinimum: minAmountOut
+        });
 
-            // Calculate slippage for this hop (distribute evenly across hops)
-            uint256 hopSlippage = slippageBps / route.pools.length;
+        amountOut = SWAP_ROUTER.exactInput(params);
 
-            // Execute single hop swap using the appropriate router
-            currentAmount = _swapExactInputDirect(currentToken, nextToken, currentAmount, pool, hopSlippage);
-
-            // Continue to next hop
-
-            currentToken = nextToken;
+        // Verify the output
+        uint256 actualReceived = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
+        if (actualReceived < minAmountOut) {
+            revert InsufficientOutput(minAmountOut, actualReceived);
         }
 
-        amountOut = currentAmount;
-        // Verify final output meets minimum requirements
-        if (amountOut < minAmountOut) {
-            revert InsufficientOutput(minAmountOut, amountOut);
-        }
+        return actualReceived;
     }
 
     function _encodeMultihopPath(SwapRoute memory route) internal pure returns (bytes memory) {
@@ -1139,14 +1027,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         // Swap tokens to USDC if needed
         if (token0 != USDC && amount0 > 0) {
-            _approveUniversalRouterViaPermit2(token0, amount0);
             usdcOut += _swapExactInputDirect(token0, USDC, amount0, pool, 500); // 5% slippage for emergency
         } else if (token0 == USDC) {
             usdcOut = amount0;
         }
 
         if (token1 != USDC && amount1 > 0) {
-            _approveUniversalRouterViaPermit2(token1, amount1);
             usdcOut += _swapExactInputDirect(token1, USDC, amount1, pool, 500); // 5% slippage for emergency
         } else if (token1 == USDC) {
             usdcOut += amount1;
