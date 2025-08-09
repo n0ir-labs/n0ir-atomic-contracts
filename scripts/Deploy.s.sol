@@ -13,7 +13,6 @@ import { RouteFinder } from "../contracts/RouteFinder.sol";
  * @notice Production deployment script for LiquidityManager, WalletRegistry, and RouteFinder contracts
  * @dev Deploy with: forge script scripts/Deploy.s.sol:Deploy --rpc-url $BASE_RPC_URL --broadcast --verify
  * 
- * @custom:security-contact security@atomiccontract.xyz
  * @custom:deployment-modes
  *  - Permissioned: Deploy with WalletRegistry for access control (USE_WALLET_REGISTRY = true)
  *  - Permissionless: Deploy without access control, open to all (USE_WALLET_REGISTRY = false)
@@ -86,7 +85,7 @@ contract Deploy is Script {
         vm.stopBroadcast();
 
         console.log("========================================");
-        console.log("✅ Deployment Complete - Production Ready!");
+        console.log("Deployment Complete - Production Ready!");
         console.log("========================================");
 
         // Print deployment summary
@@ -96,20 +95,20 @@ contract Deploy is Script {
     }
 
     function _printDeploymentSummary(address liquidityManager, address walletRegistry, address routeFinder) internal view {
-        console.log("\n=== 📋 DEPLOYMENT SUMMARY ===");
+        console.log("\n=== DEPLOYMENT SUMMARY ===");
         console.log("LiquidityManager:", liquidityManager);
         console.log("RouteFinder:", routeFinder);
 
         if (walletRegistry != address(0)) {
             console.log("WalletRegistry:", walletRegistry);
             console.log("Registry Owner:", WalletRegistry(walletRegistry).owner());
-            console.log("Access Control: ✅ ENABLED");
+            console.log("Access Control: ENABLED");
         } else {
             console.log("WalletRegistry: Not deployed");
-            console.log("Access Control: ❌ DISABLED (Permissionless Mode)");
+            console.log("Access Control: DISABLED (Permissionless Mode)");
         }
 
-        console.log("\n=== 🏛️ AERODROME V3 PROTOCOL ===");
+        console.log("\n=== AERODROME V3 PROTOCOL ===");
         console.log("Universal Router: 0x01D40099fCD87C018969B0e8D4aB1633Fb34763C");
         console.log("Swap Router: 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5");
         console.log("Position Manager: 0x827922686190790b37229fd06084350E74485b72");
@@ -117,12 +116,12 @@ contract Deploy is Script {
         console.log("Sugar Helper: 0x0AD09A66af0154a84e86F761313d02d0abB6edd5");
         console.log("Oracle: 0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2");
 
-        console.log("\n=== 💰 TOKEN ADDRESSES ===");
+        console.log("\n=== TOKEN ADDRESSES ===");
         console.log("USDC: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
         console.log("WETH: 0x4200000000000000000000000000000000000006");
         console.log("AERO: 0x940181a94A35A4569E4529A3CDfB74e38FD98631");
 
-        console.log("\n=== 🚀 NEXT STEPS ===");
+        console.log("\n=== NEXT STEPS ===");
         if (walletRegistry != address(0)) {
             console.log("1. Set operators: cast send", walletRegistry, "setOperator(address,bool) <operator> true");
             console.log("2. Register wallets: cast send", walletRegistry, "registerWallet(address) <wallet>");
@@ -139,19 +138,19 @@ contract Deploy is Script {
         );
         console.log("3. Create positions via LiquidityManager.createPosition() - routes are discovered automatically!");
         
-        console.log("\n=== 🔄 ROUTE FINDER FEATURES ===");
-        console.log("✓ Automatic route discovery for any token pair");
-        console.log("✓ Gas-efficient caching of pool lookups");
-        console.log("✓ Multi-hop routing through connector tokens (WETH, cbBTC)");
-        console.log("✓ Supports tick spacings: 1, 10, 50, 100, 200, 2000");
-        console.log("✓ No need to manually specify swap routes - it's all automatic!");
+        console.log("\n=== ROUTE FINDER FEATURES ===");
+        console.log("- Automatic route discovery for any token pair");
+        console.log("- Gas-efficient caching of pool lookups");
+        console.log("- Multi-hop routing through connector tokens (WETH, cbBTC)");
+        console.log("- Supports tick spacings: 1, 10, 50, 100, 200, 2000");
+        console.log("- No need to manually specify swap routes - it's all automatic!");
         
-        console.log("\n=== 🔒 SECURITY FEATURES ===");
-        console.log("✓ Reentrancy guards on all external functions");
-        console.log("✓ Deadline validation for MEV protection");
-        console.log("✓ Slippage protection with configurable limits");
-        console.log("✓ Custom errors for gas efficiency (~24% savings)");
-        console.log("✓ Safe ERC20 transfers with USDT compatibility");
-        console.log("✓ Production-ready with audit-quality code");
+        console.log("\n=== SECURITY FEATURES ===");
+        console.log("- Reentrancy guards on all external functions");
+        console.log("- Deadline validation for MEV protection");
+        console.log("- Slippage protection with configurable limits");
+        console.log("- Custom errors for gas efficiency (~24% savings)");
+        console.log("- Safe ERC20 transfers with USDT compatibility");
+        console.log("- Production-ready with audit-quality code");
     }
 }
