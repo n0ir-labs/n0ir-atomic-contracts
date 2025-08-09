@@ -5,7 +5,6 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title WalletRegistry
- * @author Atomic Contract Protocol
  * @notice Registry for managing authorized wallets and operators with role-based access control
  * @dev Implements two-tier permission system: operators can manage wallets, owner manages operators.
  *      Optimized for gas efficiency with batch operations and unchecked arithmetic where safe.

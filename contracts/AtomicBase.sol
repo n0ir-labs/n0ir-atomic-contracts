@@ -3,7 +3,6 @@ pragma solidity ^0.8.26;
 
 /**
  * @title AtomicBase
- * @author Atomic Contract Protocol
  * @notice Base contract providing atomic operation safety features for DeFi operations
  * @dev Implements reentrancy guards, slippage checks, deadline validation, and safe ERC20 transfers.
  *      Designed for gas efficiency with custom errors and optimized storage patterns.
