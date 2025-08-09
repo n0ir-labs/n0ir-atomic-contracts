@@ -78,13 +78,34 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @notice Oracle connector for direct routing
     address private constant NONE_CONNECTOR = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
 
-    /// @notice Slippage and precision constants
-    uint256 private constant DEFAULT_SLIPPAGE_BPS = 100; // 1%
-    uint256 private constant MAX_SLIPPAGE_BPS = 1000; // 10%
+    // ============ Mathematical Constants ============
+    
+    /// @dev Default slippage tolerance in basis points (1% = 100 bps)
+    uint256 private constant DEFAULT_SLIPPAGE_BPS = 100;
+    
+    /// @dev Maximum allowed slippage in basis points (10% = 1000 bps)
+    uint256 private constant MAX_SLIPPAGE_BPS = 1000;
+    
+    /// @dev Basis points denominator (100% = 10000 bps)
     uint256 private constant BPS_DENOMINATOR = 10_000;
+    
+    /// @dev Uniswap V3 Q96 fixed point precision (2^96)
     uint256 private constant Q96 = 2 ** 96;
+    
+    /// @dev Uniswap V3 Q128 fixed point precision (2^128)
     uint256 private constant Q128 = 2 ** 128;
+    
+    /// @dev Maximum valid tick for Uniswap V3 pools
     uint256 private constant MAX_TICK = 887_272;
+    
+    /// @dev Minimum valid tick for Uniswap V3 pools
+    int24 private constant MIN_TICK = -887272;
+    
+    /// @dev Maximum uint128 value for collect operations
+    uint128 private constant MAX_UINT128 = type(uint128).max;
+    
+    /// @dev Transaction deadline buffer (5 minutes)
+    uint256 private constant DEADLINE_BUFFER = 300;
 
     // ============ Events ============
     /// @notice Emitted when a new position is created

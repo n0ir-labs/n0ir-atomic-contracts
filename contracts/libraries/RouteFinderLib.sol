@@ -3,15 +3,29 @@ pragma solidity ^0.8.26;
 
 /**
  * @title RouteFinderLib
- * @notice Library for route finding utility functions
- * @dev Pure functions for token ordering, path encoding, and route validation
+ * @author Atomic Contract Protocol
+ * @notice Library providing utility functions for optimal swap route discovery
+ * @dev Pure functions for token ordering, path encoding, and route validation.
+ *      Gas-optimized with unchecked arithmetic where safe.
+ *      All functions are internal to be inlined by the compiler.
+ * @custom:security All functions are pure with no external calls
  */
 library RouteFinderLib {
     // ============ Custom Errors ============
+    
+    /// @notice Thrown when route configuration is invalid
     error InvalidRoute();
+    
+    /// @notice Thrown when token addresses are invalid or identical
     error InvalidTokenOrder();
+    
+    /// @notice Thrown when array parameters have mismatched lengths
     error ArrayLengthMismatch();
+    
+    /// @notice Thrown when route has no hops
     error EmptyRoute();
+    
+    /// @notice Thrown when tick spacing is invalid (zero or negative)
     error InvalidTickSpacing();
 
     // ============ Type Definitions ============
@@ -58,15 +72,22 @@ library RouteFinderLib {
 
     /**
      * @notice Orders two tokens by address (lower address first)
+     * @dev Follows Uniswap V3 convention for deterministic pool addresses
      * @param tokenA First token address
      * @param tokenB Second token address
      * @return token0 The token with the lower address
      * @return token1 The token with the higher address
+     * @custom:security Validates tokens are not zero or identical
      */
-    function orderTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
+    function orderTokens(
+        address tokenA,
+        address tokenB
+    ) internal pure returns (address token0, address token1) {
+        // Validate tokens
         if (tokenA == tokenB) revert InvalidTokenOrder();
         if (tokenA == address(0) || tokenB == address(0)) revert InvalidTokenOrder();
         
+        // Order by address
         (token0, token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
     }
 
@@ -74,21 +95,33 @@ library RouteFinderLib {
 
     /**
      * @notice Encodes a multi-hop swap path for the Swap Router
-     * @param route The swap route containing tokens and tick spacings
-     * @return path The encoded path as bytes
      * @dev Path format: token0 | tickSpacing0 | token1 | tickSpacing1 | token2...
+     * @param route The swap route containing tokens and tick spacings
+     * @return path The encoded path as bytes for exactInput swaps
+     * @custom:gas Uses unchecked loop increment
      */
     function encodePath(SwapRoute memory route) internal pure returns (bytes memory path) {
+        // Validate route
         if (route.tokens.length < 2) revert EmptyRoute();
         if (route.pools.length != route.tokens.length - 1) revert ArrayLengthMismatch();
         if (route.tickSpacings.length != route.pools.length) revert ArrayLengthMismatch();
         
+        // Start with first token
         path = abi.encodePacked(route.tokens[0]);
         
-        for (uint256 i = 0; i < route.pools.length; i++) {
+        // Append each hop
+        uint256 length = route.pools.length;
+        for (uint256 i; i < length;) {
+            // Validate tick spacing
+            if (route.tickSpacings[i] <= 0) revert InvalidTickSpacing();
+            
             // Convert int24 to uint24 for encoding
             uint24 tickSpacing = uint24(uint256(int256(route.tickSpacings[i])));
             path = abi.encodePacked(path, tickSpacing, route.tokens[i + 1]);
+            
+            unchecked {
+                ++i;
+            }
         }
     }
 
