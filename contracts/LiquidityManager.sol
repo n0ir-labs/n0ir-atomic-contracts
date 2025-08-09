@@ -205,10 +205,12 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @notice Ensures caller is authorized to act on behalf of user
     /// @param user The user address to check authorization for
     modifier onlyAuthorized(address user) {
-        if (msg.sender != user) {
-            if (address(walletRegistry) == address(0) || !walletRegistry.isWallet(msg.sender)) {
-                revert UnauthorizedAccess();
-            }
+        // If wallet registry is not set (permissionless mode), only allow self-calls
+        if (address(walletRegistry) == address(0)) {
+            if (msg.sender != user) revert UnauthorizedAccess();
+        } else {
+            // If wallet registry is set, check if sender is registered
+            if (!walletRegistry.isWallet(msg.sender)) revert UnauthorizedAccess();
         }
         _;
     }
@@ -1297,7 +1299,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @dev Only callable by wallet registry
      */
     function recoverToken(address token, uint256 amount) external {
-        if (msg.sender != address(walletRegistry)) revert UnauthorizedAccess();
+        // Only the owner of the wallet registry can recover tokens
+        if (address(walletRegistry) == address(0)) revert UnauthorizedAccess();
+        if (msg.sender != walletRegistry.owner()) revert UnauthorizedAccess();
         IERC20(token).transfer(msg.sender, amount);
         emit TokensRecovered(token, msg.sender, amount);
     }
@@ -1322,7 +1326,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         external
         returns (uint256 usdcOut, uint256 aeroRewards)
     {
-        if (msg.sender != address(walletRegistry)) revert UnauthorizedAccess();
+        // Only the owner of the wallet registry can recover positions
+        if (address(walletRegistry) == address(0)) revert UnauthorizedAccess();
+        if (msg.sender != walletRegistry.owner()) revert UnauthorizedAccess();
         if (stakedPositionOwners[tokenId] != address(0)) revert UnauthorizedAccess();
 
         address gauge = _findGaugeForPool(pool);
