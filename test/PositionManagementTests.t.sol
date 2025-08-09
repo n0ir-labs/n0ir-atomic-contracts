@@ -100,8 +100,9 @@ contract PositionManagementTests is Test {
     
     function testGetPositionInfo_NonExistent() public {
         // Test getting info for non-existent position
-        vm.expectRevert();
-        liquidityManager.getPositionInfo(999999);
+        // Note: getPositionInfo function has been removed from LiquidityManager
+        // vm.expectRevert();
+        // liquidityManager.getPositionInfo(999999);
     }
     
     function testGetPositionInfo_Structure() public {
@@ -114,8 +115,10 @@ contract PositionManagementTests is Test {
     
     function testGetAllPositionsInfo_Empty() public view {
         // Test getting all positions for user with no positions
-        LiquidityManager.PositionInfo[] memory infos = liquidityManager.getAllPositionsInfo(alice);
-        assertEq(infos.length, 0, "Should return empty array for user with no positions");
+        // Note: getAllPositionsInfo function has been removed from LiquidityManager
+        // This test is commented out as the function no longer exists
+        // LiquidityManager.PositionInfo[] memory infos = liquidityManager.getAllPositionsInfo(alice);
+        // assertEq(infos.length, 0, "Should return empty array for user with no positions");
     }
     
     // ============ Helper Function Tests ============

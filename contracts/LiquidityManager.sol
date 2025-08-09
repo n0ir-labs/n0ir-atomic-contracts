@@ -1001,31 +1001,27 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         for (uint256 i = 0; i < connectors.length; i++) {
             try ORACLE.getRate(
-                USDC, // from token (USDC)
-                token, // to token (the token we want price for)
+                token, // from token (the token we want price for)
+                USDC, // to token (USDC)
                 connectors[i],
                 0
             ) returns (uint256 rate, uint256 weight) {
                 if (rate > 0 && weight > 0) {
-                    // Oracle returns the rate of USDC -> token with 18 decimals
-                    // This tells us how much token we get for 1 USDC
-                    // To get the price of token in USDC, we need to invert this
-
-                    // For WETH: if rate = 258926278352007064085601812 (0.000258926... WETH per USDC)
-                    // Then 1 WETH = 1 / 0.000258926... = ~3862 USDC
-
-                    // Calculate price: we need to invert the rate
-                    // rate = amount of token per 1 USDC (with 18 decimals)
-                    // We want: USDC per 1 token (with 6 decimals)
-
-                    // The math:
-                    // - Oracle gives us: X tokens per 1 USDC (with 18 decimals)
-                    // - We want: Y USDC per 1 token (with 6 decimals)
-                    // - Formula: Y = 1/X but accounting for decimals
-                    // - Y = (1 * 10^6) / (X / 10^18) = 10^6 * 10^18 / X = 10^24 / X
-                    // - But since X can be > 10^24, we need 10^30 / X to get enough precision
-                    // - Result needs to be multiplied by 1e6 to get proper USDC decimals
-                    price = (1e30 / rate) * 1e6;
+                    // Oracle returns how much USDC we get for 1e18 units of the source token
+                    // We need to adjust for tokens with different decimals
+                    uint8 tokenDecimals = IERC20Metadata(token).decimals();
+                    
+                    if (tokenDecimals == 18) {
+                        // For 18 decimal tokens, rate is already the price
+                        price = rate;
+                    } else if (tokenDecimals < 18) {
+                        // For tokens with < 18 decimals, we need to divide by the difference
+                        // e.g., cbBTC has 8 decimals, so divide by 10^(18-8) = 10^10
+                        price = rate / (10 ** (18 - tokenDecimals));
+                    } else {
+                        // For tokens with > 18 decimals (rare), multiply
+                        price = rate * (10 ** (tokenDecimals - 18));
+                    }
 
                     // Ensure price is non-zero
                     if (price > 0) {
