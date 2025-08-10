@@ -8,7 +8,6 @@ import "../contracts/WalletRegistry.sol";
 import "../interfaces/IERC20.sol";
 import "../interfaces/ICLPool.sol";
 import "../interfaces/INonfungiblePositionManager.sol";
-import "../interfaces/IGauge.sol";
 
 /**
  * @title PositionManagementTests
@@ -157,10 +156,6 @@ contract PositionManagementTests is Test {
     
     function testEdgeCase_PositionOutOfRange() public {
         // Test position info when position is out of range
-    }
-    
-    function testEdgeCase_NoGaugeForPool() public {
-        // Test claiming rewards for pool without gauge
     }
     
     function testEdgeCase_ZeroLiquidity() public {

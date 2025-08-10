@@ -7,13 +7,10 @@ import { RouteFinder } from "./RouteFinder.sol";
 import { RouteFinderLib } from "./libraries/RouteFinderLib.sol";
 import { ISwapRouter } from "@interfaces/ISwapRouter.sol";
 import { INonfungiblePositionManager } from "@interfaces/INonfungiblePositionManager.sol";
-import { IGauge } from "@interfaces/IGauge.sol";
 import { ICLPool } from "@interfaces/ICLPool.sol";
 import { IMixedQuoter } from "@interfaces/IMixedQuoter.sol";
 import { ISugarHelper } from "@interfaces/ISugarHelper.sol";
 import { IERC20 } from "@interfaces/IERC20.sol";
-import { IGaugeFactory } from "@interfaces/IGaugeFactory.sol";
-import { IVoter } from "@interfaces/IVoter.sol";
 import { IAerodromeOracle } from "@interfaces/IAerodromeOracle.sol";
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -55,13 +52,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     IAerodromeOracle public constant ORACLE = IAerodromeOracle(0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2);
 
-    /// @notice Gauge and voting infrastructure
-    address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
-    address public constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
-
     /// @notice Token addresses
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
     address public constant WETH = 0x4200000000000000000000000000000000000006;
     address public constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
@@ -116,8 +108,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @param user The address closing the position
     /// @param tokenId The NFT token ID being closed
     /// @param usdcOut Amount of USDC returned
-    /// @param aeroRewards Always 0 in non-custodial design (kept for interface compatibility)
-    event PositionClosed(address indexed user, uint256 indexed tokenId, uint256 usdcOut, uint256 aeroRewards);
+    event PositionClosed(address indexed user, uint256 indexed tokenId, uint256 usdcOut);
 
     /// @notice Emitted when tokens are recovered
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
@@ -448,8 +439,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(mintParams);
 
         // Non-custodial design: Users maintain full control of their positions
-        // Staking and reward management is the user's responsibility
-
         _returnLeftoverTokens(token0, token1);
 
         emit PositionCreated(msg.sender, tokenId, params.pool, params.usdcAmount, liquidity);
@@ -463,7 +452,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @param minUsdcOut Minimum USDC to receive
      * @param slippageBps Slippage tolerance in basis points
      * @return usdcOut Amount of USDC returned to user
-     * @return aeroRewards Amount of AERO rewards (always 0 in non-custodial design)
      * @dev Non-custodial: User must approve this contract to transfer their NFT before calling
      * @dev Automatically discovers optimal swap routes using RouteFinder
      */
@@ -478,7 +466,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         nonReentrant
         deadlineCheck(deadline)
         onlyAuthorized(msg.sender)
-        returns (uint256 usdcOut, uint256 aeroRewards)
+        returns (uint256 usdcOut)
     {
         require(address(routeFinder) != address(0), "RouteFinder not configured");
         
@@ -522,7 +510,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return _closePosition(params);
     }
 
-    function _closePosition(ExitParams memory params) internal returns (uint256 usdcOut, uint256 aeroRewards) {
+    function _closePosition(ExitParams memory params) internal returns (uint256 usdcOut) {
         // SECURITY: Verify user owns the position before processing
         address positionOwner = POSITION_MANAGER.ownerOf(params.tokenId);
         require(positionOwner == msg.sender, "Not the owner of this position");
@@ -531,9 +519,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         // This requires the user to call approve() on the Position Manager before calling closePosition
         POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
         
-        // No AERO rewards in non-custodial design (users manage their own staking)
-        aeroRewards = 0;
-
         // Collect any fees first
         POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
@@ -609,10 +594,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             IERC20(USDC).transfer(msg.sender, usdcOut);
         }
 
-        // Note: aeroRewards is always 0 in non-custodial design
-        // Users manage their own staking and reward claiming
-
-        emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
+        emit PositionClosed(msg.sender, params.tokenId, usdcOut);
     }
 
 
@@ -775,7 +757,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
                 // Amount of token0 needed to get usdc1Equivalent worth of token1
                 // token0Amount = (usdc1Equivalent / token0Price) * 1e18 (adjusting for decimals)
-                uint256 token0Decimals = token0 == WETH ? 18 : (token0 == CBBTC ? 8 : 6);
+                uint256 token0Decimals = _getTokenDecimals(token0);
                 token0ForToken1 = (usdc1Equivalent * (10 ** token0Decimals)) / token0Price;
             }
 
@@ -1046,9 +1028,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
 
-    // Removed: _findGaugeForPool no longer needed in non-custodial design
-    // Users manage their own gauge staking if desired
-
     function _getEffectiveSlippage(uint256 requestedSlippage) internal pure returns (uint256) {
         if (requestedSlippage == 0) {
             return DEFAULT_SLIPPAGE_BPS;
@@ -1272,7 +1251,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (token == USDC) return 6;
         if (token == WETH) return 18;
         if (token == CBBTC) return 8;
-        if (token == AERO) return 18;
         
         try IERC20Metadata(token).decimals() returns (uint8 decimals) {
             return decimals;

@@ -128,7 +128,7 @@ contract NonCustodialTest is Test {
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), tokenId);
         console.log("  Approved LiquidityManager to transfer NFT");
         
-        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePosition(
+        uint256 usdcOut = liquidityManager.closePosition(
             tokenId,
             USDC_AERO_POOL,
             block.timestamp + 3600,
@@ -138,9 +138,7 @@ contract NonCustodialTest is Test {
         
         console.log("  Position closed successfully!");
         console.log("  USDC returned:", usdcOut / 1e6);
-        console.log("  AERO rewards:", aeroRewards); // Should be 0
         
-        assertEq(aeroRewards, 0, "AERO rewards should be 0 in non-custodial design");
         
         // Verify NFT was burned
         vm.expectRevert();

@@ -8,8 +8,6 @@ import "../contracts/WalletRegistry.sol";
 import "../interfaces/IERC20.sol";
 import "../interfaces/ICLPool.sol";
 import "../interfaces/INonfungiblePositionManager.sol";
-import "../interfaces/IVoter.sol";
-import "../interfaces/IGauge.sol";
 
 /**
  * @title PoolLifecycleTests
@@ -27,7 +25,6 @@ contract PoolLifecycleTests is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
     address constant POSITION_MANAGER = 0x827922686190790b37229fd06084350E74485b72;
-    address constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
     
     // Pool 1: WETH/NEURO (0xDBFeFD2e8460a6Ee4955A68582F85708BAEA60A3)
     address constant WETH_NEURO_POOL = 0x6446021F4E396dA3df4235C62537431372195D38;
@@ -86,13 +83,6 @@ contract PoolLifecycleTests is Test {
         return ICLPool(pool).tickSpacing();
     }
     
-    function _getGauge(address pool) internal view returns (address) {
-        try IVoter(VOTER).gauges(pool) returns (address gauge) {
-            return gauge;
-        } catch {
-            return address(0);
-        }
-    }
     
     // ============ Test 1: WETH/NEURO Pool Lifecycle ============
     
@@ -152,7 +142,7 @@ contract PoolLifecycleTests is Test {
         vm.warp(block.timestamp + 7 days);
         console.log("  Advanced 7 days");
         
-        // Note: Since positions are non-custodial, users manage their own staking/rewards
+        // Note: Since positions are non-custodial, users manage their own positions
         console.log("  Users can stake their positions directly if desired");
         
         console.log("\n--- Step 3: Close Position ---");
@@ -162,12 +152,11 @@ contract PoolLifecycleTests is Test {
         console.log("  Alice approved LiquidityManager to transfer NFT");
         
         uint256 usdcBeforeClose = IERC20(USDC).balanceOf(alice);
-        uint256 aeroBeforeClose = IERC20(AERO).balanceOf(alice);
         
         // Close position with auto-routing
         // Use more conservative minimum (accounting for IL, fees, and slippage)
         uint256 minUsdcOut = (usdcBefore - usdcAfter) * 85 / 100; // Expect at least 85% back
-        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePosition(
+        uint256 usdcOut = liquidityManager.closePosition(
             tokenId,
             WETH_NEURO_POOL,
             block.timestamp + 3600,
@@ -177,14 +166,10 @@ contract PoolLifecycleTests is Test {
         
         console.log("Position closed!");
         console.log("  USDC received:", usdcOut / 1e6, "USDC");
-        console.log("  AERO rewards:", aeroRewards / 1e18, "AERO (should be 0 - non-custodial)");
         
         uint256 usdcAfterClose = IERC20(USDC).balanceOf(alice);
-        uint256 aeroAfterClose = IERC20(AERO).balanceOf(alice);
         
         assertEq(usdcAfterClose - usdcBeforeClose, usdcOut, "USDC balance should increase by usdcOut");
-        assertEq(aeroRewards, 0, "AERO rewards should be 0 in non-custodial design");
-        assertEq(aeroAfterClose, aeroBeforeClose, "AERO balance should not change");
         
         // Calculate PnL
         int256 pnl = int256(usdcAfterClose) - int256(usdcBefore);
@@ -194,7 +179,6 @@ contract PoolLifecycleTests is Test {
         } else {
             console.log("  Net PnL: -", uint256(-pnl) / 1e6, "USDC");
         }
-        console.log("  Note: No AERO rewards in non-custodial design");
         
         vm.stopPrank();
         
@@ -289,12 +273,11 @@ contract PoolLifecycleTests is Test {
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), tokenId);
         
         uint256 usdcBeforeClose = IERC20(USDC).balanceOf(bob);
-        uint256 aeroBeforeClose = IERC20(AERO).balanceOf(bob);
         
         // Close position with auto-routing
         // Use more conservative minimum (accounting for IL, fees, and slippage)
         uint256 minUsdcOut = (usdcBefore - usdcAfter) * 85 / 100; // Expect at least 85% back
-        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePosition(
+        uint256 usdcOut = liquidityManager.closePosition(
             tokenId,
             USDC_AERO_POOL,
             type(uint256).max, // max deadline to avoid fork timestamp issues
@@ -304,12 +287,10 @@ contract PoolLifecycleTests is Test {
         
         console.log("Position closed!");
         console.log("  USDC received:", usdcOut / 1e6, "USDC");
-        console.log("  AERO rewards:", aeroRewards / 1e18, "AERO (should be 0 since not staked)");
         
         uint256 usdcAfterClose = IERC20(USDC).balanceOf(bob);
         
         assertEq(usdcAfterClose - usdcBeforeClose, usdcOut, "USDC balance should increase by usdcOut");
-        assertEq(aeroRewards, 0, "Should have no AERO rewards since position wasn't staked");
         
         // Calculate PnL
         int256 pnl = int256(usdcAfterClose) - int256(usdcBefore);
@@ -386,7 +367,7 @@ contract PoolLifecycleTests is Test {
         vm.startPrank(alice);
         // First approve the NFT to LiquidityManager
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), aliceTokenId);
-        (uint256 aliceUsdcOut, uint256 aliceAero) = liquidityManager.closePosition(
+        uint256 aliceUsdcOut = liquidityManager.closePosition(
             aliceTokenId,
             WETH_NEURO_POOL,
             block.timestamp + 3600,
@@ -394,7 +375,6 @@ contract PoolLifecycleTests is Test {
             500     // 5% slippage
         );
         console.log("  Alice received:", aliceUsdcOut / 1e6, "USDC");
-        console.log("  Alice AERO rewards:", aliceAero / 1e18, "AERO (always 0 - non-custodial)");
         vm.stopPrank();
         
         // Bob's position should still exist (owned by Bob)
@@ -406,7 +386,7 @@ contract PoolLifecycleTests is Test {
         vm.startPrank(bob);
         // First approve the NFT to LiquidityManager
         INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), bobTokenId);
-        (uint256 bobUsdcOut, uint256 bobAero) = liquidityManager.closePosition(
+        uint256 bobUsdcOut = liquidityManager.closePosition(
             bobTokenId,
             WETH_NEURO_POOL,
             block.timestamp + 3600,
@@ -414,7 +394,6 @@ contract PoolLifecycleTests is Test {
             500     // 5% slippage
         );
         console.log("  Bob received:", bobUsdcOut / 1e6, "USDC");
-        console.log("  Bob AERO rewards:", bobAero / 1e18, "AERO (always 0 - non-custodial)");
         vm.stopPrank();
         
         console.log("\n--- Test completed successfully ---");

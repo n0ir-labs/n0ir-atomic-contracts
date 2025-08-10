@@ -199,7 +199,7 @@ contract AutoRoutingIntegrationTest is Test {
         uint256 usdcBefore = IERC20(USDC).balanceOf(testUser);
         
         // Close position with auto-routing (now the default)
-        (uint256 usdcOut, uint256 aeroRewards) = liquidityManager.closePosition(
+        uint256 usdcOut = liquidityManager.closePosition(
             tokenId,
             pool,
             block.timestamp + 3600,
