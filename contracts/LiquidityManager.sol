@@ -45,6 +45,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     
     /// @notice Mapping from position ID to the address that created it
     mapping(uint256 => address) public positionOwners;
+    
+    /// @notice Mapping from address to array of position IDs they created
+    mapping(address => uint256[]) public userPositions;
 
     // ============ Constants ============
     /// @notice Core contracts - immutable for gas optimization
@@ -439,6 +442,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         
         // Track position ownership
         positionOwners[tokenId] = msg.sender;
+        userPositions[msg.sender].push(tokenId);
 
         // Non-custodial design: Users maintain full control of their positions
         _returnLeftoverTokens(token0, token1);
@@ -598,6 +602,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         
         // Clear position ownership tracking
         delete positionOwners[params.tokenId];
+        _removePositionFromUser(msg.sender, params.tokenId);
 
         emit PositionClosed(msg.sender, params.tokenId, usdcOut);
     }
@@ -1114,6 +1119,24 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     function getPositionOwner(uint256 tokenId) external view returns (address) {
         return positionOwners[tokenId];
     }
+    
+    /**
+     * @notice Returns all position IDs created by a specific address
+     * @param user The address to query positions for
+     * @return An array of position token IDs created by the user
+     */
+    function getUserPositions(address user) external view returns (uint256[] memory) {
+        return userPositions[user];
+    }
+    
+    /**
+     * @notice Returns the number of positions created by a specific address
+     * @param user The address to query
+     * @return The count of positions created by the user
+     */
+    function getUserPositionCount(address user) external view returns (uint256) {
+        return userPositions[user].length;
+    }
 
     /**
      * @notice Calculates tick range from percentage
@@ -1269,6 +1292,25 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             return decimals;
         } catch {
             return 18; // Default to 18 decimals
+        }
+    }
+    
+    /**
+     * @notice Removes a position ID from a user's position array
+     * @param user The user address
+     * @param tokenId The position token ID to remove
+     */
+    function _removePositionFromUser(address user, uint256 tokenId) internal {
+        uint256[] storage positions = userPositions[user];
+        uint256 length = positions.length;
+        
+        for (uint256 i = 0; i < length; i++) {
+            if (positions[i] == tokenId) {
+                // Move the last element to this position and pop
+                positions[i] = positions[length - 1];
+                positions.pop();
+                break;
+            }
         }
     }
 }
