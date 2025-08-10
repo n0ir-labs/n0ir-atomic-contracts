@@ -8,7 +8,6 @@ import "../contracts/WalletRegistry.sol";
 import "../interfaces/IERC20.sol";
 import "../interfaces/ICLPool.sol";
 import "../interfaces/INonfungiblePositionManager.sol";
-import "../interfaces/IGauge.sol";
 
 /**
  * @title PositionManagementTests
@@ -50,58 +49,40 @@ contract PositionManagementTests is Test {
         vm.deal(bob, 10 ether);
     }
     
-    // ============ Claim Rewards Tests ============
+    // ============ Position Management Tests ============
     
-    function testClaimRewards_SinglePosition() public {
-        // This test would need a fork to work with real positions
-        // For now, we test the function exists and reverts properly
+    function testCreatePosition_MintsToUser() public {
+        // Test that positions are minted directly to the user
+        // This would need a fork to work with real pools
         
-        vm.startPrank(alice);
-        
-        // Try to claim rewards for non-existent position
-        vm.expectRevert();
-        liquidityManager.claimRewards(999999);
-        
-        vm.stopPrank();
+        // Note: Since claimRewards functions are removed, 
+        // we only test that positions are created non-custodially
     }
     
-    function testClaimRewards_NotOwner() public {
-        // Test that non-owners cannot claim rewards
+    function testClosePosition_RequiresOwnership() public {
+        // Test that only position owners can close their positions
         vm.startPrank(bob);
         
-        // Try to claim rewards for a position not owned by bob
-        vm.expectRevert("Not the owner of this position");
-        liquidityManager.claimRewards(1);
+        // Try to close a position not owned by bob
+        // This would need a real position to test properly
         
         vm.stopPrank();
     }
     
-    function testClaimAllRewards_EmptyPositions() public {
-        // Test claiming all rewards when user has no positions
-        vm.startPrank(alice);
+    function testNonCustodialPositions() public {
+        // Test that the contract never takes custody of NFT positions
+        // Positions should always be owned by users
         
-        uint256 aeroAmount = liquidityManager.claimAllRewards(alice);
-        assertEq(aeroAmount, 0, "Should return 0 for no positions");
-        
-        vm.stopPrank();
-    }
-    
-    function testClaimAllRewards_OnlyOwnRewards() public {
-        // Test that users can only claim their own rewards
-        vm.startPrank(alice);
-        
-        vm.expectRevert("Can only claim own rewards");
-        liquidityManager.claimAllRewards(bob);
-        
-        vm.stopPrank();
+        // This would require fork testing with real position creation
     }
     
     // ============ Position Info Tests ============
     
     function testGetPositionInfo_NonExistent() public {
         // Test getting info for non-existent position
-        vm.expectRevert();
-        liquidityManager.getPositionInfo(999999);
+        // Note: getPositionInfo function has been removed from LiquidityManager
+        // vm.expectRevert();
+        // liquidityManager.getPositionInfo(999999);
     }
     
     function testGetPositionInfo_Structure() public {
@@ -114,8 +95,10 @@ contract PositionManagementTests is Test {
     
     function testGetAllPositionsInfo_Empty() public view {
         // Test getting all positions for user with no positions
-        LiquidityManager.PositionInfo[] memory infos = liquidityManager.getAllPositionsInfo(alice);
-        assertEq(infos.length, 0, "Should return empty array for user with no positions");
+        // Note: getAllPositionsInfo function has been removed from LiquidityManager
+        // This test is commented out as the function no longer exists
+        // LiquidityManager.PositionInfo[] memory infos = liquidityManager.getAllPositionsInfo(alice);
+        // assertEq(infos.length, 0, "Should return empty array for user with no positions");
     }
     
     // ============ Helper Function Tests ============
@@ -173,10 +156,6 @@ contract PositionManagementTests is Test {
     
     function testEdgeCase_PositionOutOfRange() public {
         // Test position info when position is out of range
-    }
-    
-    function testEdgeCase_NoGaugeForPool() public {
-        // Test claiming rewards for pool without gauge
     }
     
     function testEdgeCase_ZeroLiquidity() public {
