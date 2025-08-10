@@ -166,12 +166,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @param _routeFinder Address of the RouteFinder contract (can be address(0) to disable auto-routing)
     /// @dev Registry can be address(0) for permissionless deployment
     constructor(address _walletRegistry, address _routeFinder) {
-        if (_walletRegistry != address(0)) {
-            walletRegistry = WalletRegistry(_walletRegistry);
-        }
-        if (_routeFinder != address(0)) {
-            routeFinder = RouteFinder(_routeFinder);
-        }
+        walletRegistry = WalletRegistry(_walletRegistry);
+        routeFinder = RouteFinder(_routeFinder);
     }
 
     // ============ Modifiers ============
