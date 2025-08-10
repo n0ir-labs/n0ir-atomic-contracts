@@ -42,6 +42,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     
     /// @notice RouteFinder contract for automatic route discovery
     RouteFinder public immutable routeFinder;
+    
+    /// @notice Mapping from position ID to the address that created it
+    mapping(uint256 => address) public positionOwners;
 
     // ============ Constants ============
     /// @notice Core contracts - immutable for gas optimization
@@ -433,6 +436,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         });
 
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(mintParams);
+        
+        // Track position ownership
+        positionOwners[tokenId] = msg.sender;
 
         // Non-custodial design: Users maintain full control of their positions
         _returnLeftoverTokens(token0, token1);
@@ -589,6 +595,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (usdcOut > 0) {
             IERC20(USDC).transfer(msg.sender, usdcOut);
         }
+        
+        // Clear position ownership tracking
+        delete positionOwners[params.tokenId];
 
         emit PositionClosed(msg.sender, params.tokenId, usdcOut);
     }
@@ -1096,7 +1105,15 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
 
     // ============ External View Functions ============
-
+    
+    /**
+     * @notice Returns the address that created a position
+     * @param tokenId The position NFT token ID
+     * @return The address of the user who created the position
+     */
+    function getPositionOwner(uint256 tokenId) external view returns (address) {
+        return positionOwners[tokenId];
+    }
 
     /**
      * @notice Calculates tick range from percentage
