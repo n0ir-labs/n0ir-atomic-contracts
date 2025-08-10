@@ -7,21 +7,19 @@ import { RouteFinder } from "./RouteFinder.sol";
 import { RouteFinderLib } from "./libraries/RouteFinderLib.sol";
 import { ISwapRouter } from "@interfaces/ISwapRouter.sol";
 import { INonfungiblePositionManager } from "@interfaces/INonfungiblePositionManager.sol";
-import { IGauge } from "@interfaces/IGauge.sol";
 import { ICLPool } from "@interfaces/ICLPool.sol";
 import { IMixedQuoter } from "@interfaces/IMixedQuoter.sol";
 import { ISugarHelper } from "@interfaces/ISugarHelper.sol";
 import { IERC20 } from "@interfaces/IERC20.sol";
-import { IGaugeFactory } from "@interfaces/IGaugeFactory.sol";
-import { IVoter } from "@interfaces/IVoter.sol";
 import { IAerodromeOracle } from "@interfaces/IAerodromeOracle.sol";
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title LiquidityManager
- * @notice Manages atomic liquidity operations for Aerodrome V3 Slipstream pools
- * @dev Implements concentrated liquidity position management with atomic swap/mint/stake capabilities
+ * @notice Non-custodial atomic liquidity operations for Aerodrome V3 Slipstream pools
+ * @dev Implements concentrated liquidity position management without taking custody of user NFTs
+ * @dev Security: Positions are always minted directly to users, never held by the contract
  */
 contract LiquidityManager is AtomicBase, IERC721Receiver {
     // ============ Custom Errors ============
@@ -32,8 +30,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     error InsufficientBalance();
     error SwapFailed();
     error MintFailed();
-    error StakeFailed();
-    error GaugeNotFound();
     error OraclePriceUnavailable();
     error InvalidRecipient();
     error ArrayLengthMismatch();
@@ -47,15 +43,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @notice RouteFinder contract for automatic route discovery
     RouteFinder public immutable routeFinder;
 
-    /// @notice Tracks ownership of staked positions (tokenId => owner)
-    mapping(uint256 => address) public stakedPositionOwners;
-
-    /// @notice Tracks position IDs owned by each address
-    mapping(address => uint256[]) private ownerPositionIds;
-
-    /// @notice Tracks index of position ID in owner's array for efficient removal
-    mapping(uint256 => uint256) private positionIdIndex;
-
     // ============ Constants ============
     /// @notice Core contracts - immutable for gas optimization
     ISwapRouter public constant SWAP_ROUTER = ISwapRouter(0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5);
@@ -65,13 +52,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     IAerodromeOracle public constant ORACLE = IAerodromeOracle(0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2);
 
-    /// @notice Gauge and voting infrastructure
-    address public constant GAUGE_FACTORY = 0xD30677bd8dd15132F251Cb54CbDA552d2A05Fb08;
-    address public constant VOTER = 0x16613524e02ad97eDfeF371bC883F2F5d6C480A5;
-
     /// @notice Token addresses
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
     address public constant WETH = 0x4200000000000000000000000000000000000006;
     address public constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
@@ -114,22 +96,19 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @param pool The pool address
     /// @param usdcIn Amount of USDC invested
     /// @param liquidity Amount of liquidity minted
-    /// @param staked Whether the position was staked
     event PositionCreated(
         address indexed user,
         uint256 indexed tokenId,
         address indexed pool,
         uint256 usdcIn,
-        uint128 liquidity,
-        bool staked
+        uint128 liquidity
     );
 
     /// @notice Emitted when a position is closed
     /// @param user The address closing the position
     /// @param tokenId The NFT token ID being closed
     /// @param usdcOut Amount of USDC returned
-    /// @param aeroRewards Amount of AERO rewards claimed
-    event PositionClosed(address indexed user, uint256 indexed tokenId, uint256 usdcOut, uint256 aeroRewards);
+    event PositionClosed(address indexed user, uint256 indexed tokenId, uint256 usdcOut);
 
     /// @notice Emitted when tokens are recovered
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
@@ -137,11 +116,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @notice Emitted when a swap is executed
     event SwapExecuted(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
 
-    /// @notice Emitted when rewards are claimed from a position
-    event RewardsClaimed(address indexed user, uint256 indexed tokenId, uint256 aeroAmount);
-
-    /// @notice Emitted when rewards are claimed from multiple positions
-    event AllRewardsClaimed(address indexed user, uint256 totalAeroAmount, uint256 positionCount);
 
     // ============ Type Definitions ============
     /// @notice Defines the type of routing strategy
@@ -170,7 +144,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 deadline; // Transaction deadline
         uint256 usdcAmount; // USDC amount to invest
         uint256 slippageBps; // Slippage tolerance in basis points
-        bool stake; // Whether to stake in gauge
         SwapRoute token0Route; // Routing for token0
         SwapRoute token1Route; // Routing for token1
     }
@@ -193,12 +166,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     /// @param _routeFinder Address of the RouteFinder contract (can be address(0) to disable auto-routing)
     /// @dev Registry can be address(0) for permissionless deployment
     constructor(address _walletRegistry, address _routeFinder) {
-        if (_walletRegistry != address(0)) {
-            walletRegistry = WalletRegistry(_walletRegistry);
-        }
-        if (_routeFinder != address(0)) {
-            routeFinder = RouteFinder(_routeFinder);
-        }
+        walletRegistry = WalletRegistry(_walletRegistry);
+        routeFinder = RouteFinder(_routeFinder);
     }
 
     // ============ Modifiers ============
@@ -224,9 +193,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @param deadline Transaction deadline
      * @param usdcAmount USDC amount to invest
      * @param slippageBps Slippage tolerance in basis points
-     * @param stake Whether to stake in gauge
      * @return tokenId The NFT token ID of the created position
      * @return liquidity The amount of liquidity minted
+     * @dev Non-custodial: Position NFT is minted directly to msg.sender
      * @dev Automatically calculates ticks based on current price and desired range percentage
      */
     function createPosition(
@@ -234,8 +203,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         uint256 rangePercentage,
         uint256 deadline,
         uint256 usdcAmount,
-        uint256 slippageBps,
-        bool stake
+        uint256 slippageBps
     )
         external
         nonReentrant
@@ -281,7 +249,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             deadline: deadline,
             usdcAmount: usdcAmount,
             slippageBps: slippageBps,
-            stake: stake,
             token0Route: SwapRoute({
                 pools: token0Route.pools,
                 tokens: token0Route.tokens,
@@ -306,9 +273,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @param deadline Transaction deadline
      * @param usdcAmount USDC amount to invest
      * @param slippageBps Slippage tolerance in basis points
-     * @param stake Whether to stake in gauge
      * @return tokenId The NFT token ID of the created position
      * @return liquidity The amount of liquidity minted
+     * @dev Non-custodial: Position NFT is minted directly to msg.sender
      * @dev For advanced users who need precise tick control
      */
     function createPositionWithTicks(
@@ -317,8 +284,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         int24 tickUpper,
         uint256 deadline,
         uint256 usdcAmount,
-        uint256 slippageBps,
-        bool stake
+        uint256 slippageBps
     )
         external
         nonReentrant
@@ -355,7 +321,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             deadline: deadline,
             usdcAmount: usdcAmount,
             slippageBps: slippageBps,
-            stake: stake,
             token0Route: SwapRoute({
                 pools: token0Route.pools,
                 tokens: token0Route.tokens,
@@ -450,7 +415,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             amount1Min = (amount1 * (10_000 - effectiveSlippage)) / 10_000;
         }
         
-        // Mint position
+        // CRITICAL FIX: Mint position directly to the user (non-custodial)
+        // This ensures users maintain ownership of their NFT positions at all times
         INonfungiblePositionManager.MintParams memory mintParams = INonfungiblePositionManager.MintParams({
             token0: token0,
             token1: token1,
@@ -461,37 +427,17 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             amount1Desired: amount1,
             amount0Min: amount0Min,
             amount1Min: amount1Min,
-            recipient: params.stake ? address(this) : msg.sender,
+            recipient: msg.sender, // SECURITY: Always mint directly to user, never to contract
             deadline: params.deadline,
             sqrtPriceX96: 0
         });
 
         (tokenId, liquidity,,) = POSITION_MANAGER.mint(mintParams);
 
-        // Stake if requested
-        if (params.stake) {
-            address gauge = _findGaugeForPool(params.pool);
-            if (gauge != address(0)) {
-                // Track ownership before staking
-                stakedPositionOwners[tokenId] = msg.sender;
-
-                // Add position to owner's list
-                ownerPositionIds[msg.sender].push(tokenId);
-                positionIdIndex[tokenId] = ownerPositionIds[msg.sender].length - 1;
-
-                POSITION_MANAGER.approve(gauge, tokenId);
-                IGauge(gauge).deposit(tokenId);
-                // NFT is now held by the gauge, tracked ownership allows user to claim later
-            } else {
-                // If no gauge found, return position to user
-                POSITION_MANAGER.safeTransferFrom(address(this), msg.sender, tokenId);
-            }
-        }
-        // If not staking, position was already minted directly to user (no transfer needed)
-
+        // Non-custodial design: Users maintain full control of their positions
         _returnLeftoverTokens(token0, token1);
 
-        emit PositionCreated(msg.sender, tokenId, params.pool, params.usdcAmount, liquidity, params.stake);
+        emit PositionCreated(msg.sender, tokenId, params.pool, params.usdcAmount, liquidity);
     }
 
     /**
@@ -502,7 +448,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @param minUsdcOut Minimum USDC to receive
      * @param slippageBps Slippage tolerance in basis points
      * @return usdcOut Amount of USDC returned to user
-     * @return aeroRewards Amount of AERO rewards claimed
+     * @dev Non-custodial: User must approve this contract to transfer their NFT before calling
      * @dev Automatically discovers optimal swap routes using RouteFinder
      */
     function closePosition(
@@ -516,7 +462,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         nonReentrant
         deadlineCheck(deadline)
         onlyAuthorized(msg.sender)
-        returns (uint256 usdcOut, uint256 aeroRewards)
+        returns (uint256 usdcOut)
     {
         require(address(routeFinder) != address(0), "RouteFinder not configured");
         
@@ -560,34 +506,15 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return _closePosition(params);
     }
 
-    function _closePosition(ExitParams memory params) internal returns (uint256 usdcOut, uint256 aeroRewards) {
-        address gauge = _findGaugeForPool(params.pool);
-
-        // Track AERO rewards
-        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-
-        // Check if position is staked by checking NFT ownership
+    function _closePosition(ExitParams memory params) internal returns (uint256 usdcOut) {
+        // SECURITY: Verify user owns the position before processing
         address positionOwner = POSITION_MANAGER.ownerOf(params.tokenId);
+        require(positionOwner == msg.sender, "Not the owner of this position");
 
-        // Handle staked positions
-        if (gauge != address(0) && positionOwner == gauge) {
-            // Position is staked in gauge - verify ownership
-            require(stakedPositionOwners[params.tokenId] == msg.sender, "Not the owner of this staked position");
-
-            // Withdraw from gauge
-            IGauge(gauge).withdraw(params.tokenId);
-            aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
-
-            // Remove position from owner's list
-            _removePositionFromOwner(msg.sender, params.tokenId);
-
-            // Clear ownership tracking
-            delete stakedPositionOwners[params.tokenId];
-        } else {
-            // Position is not staked - transfer from user
-            POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
-        }
-
+        // Non-custodial: User must approve the contract to transfer their NFT
+        // This requires the user to call approve() on the Position Manager before calling closePosition
+        POSITION_MANAGER.safeTransferFrom(msg.sender, address(this), params.tokenId);
+        
         // Collect any fees first
         POSITION_MANAGER.collect(
             INonfungiblePositionManager.CollectParams({
@@ -663,121 +590,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             IERC20(USDC).transfer(msg.sender, usdcOut);
         }
 
-        if (aeroRewards > 0) {
-            IERC20(AERO).transfer(msg.sender, aeroRewards);
-        }
-
-        emit PositionClosed(msg.sender, params.tokenId, usdcOut, aeroRewards);
+        emit PositionClosed(msg.sender, params.tokenId, usdcOut);
     }
 
-    /**
-     * @notice Claims AERO rewards for a single staked position
-     * @param tokenId The position NFT token ID
-     * @return aeroAmount Amount of AERO rewards claimed
-     * @dev Only the position owner can claim rewards
-     */
-    function claimRewards(uint256 tokenId) 
-        external 
-        nonReentrant 
-        returns (uint256 aeroAmount) 
-    {
-        // Check if position is staked and owned by sender
-        address positionOwner = stakedPositionOwners[tokenId];
-        
-        if (positionOwner == address(0)) {
-            // Position might be unstaked, check direct ownership
-            positionOwner = POSITION_MANAGER.ownerOf(tokenId);
-            require(positionOwner == msg.sender, "Not the owner of this position");
-            
-            // Unstaked positions don't earn AERO rewards
-            return 0;
-        }
-        
-        require(positionOwner == msg.sender, "Not the owner of this staked position");
-        
-        // Get position details to find the pool and gauge
-        (,, address token0, address token1, int24 tickSpacing,,,,,,,) = POSITION_MANAGER.positions(tokenId);
-        
-        // Reconstruct pool address (we need to find it from token0, token1, tickSpacing)
-        // This is a limitation - we might need to track pool addresses per position
-        address pool = address(0); // Pool lookup removed to save contract size
-        require(pool != address(0), "Pool not found");
-        
-        address gauge = _findGaugeForPool(pool);
-        require(gauge != address(0), "No gauge for this pool");
-        
-        // Track AERO balance before claim
-        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        
-        // Claim rewards from gauge
-        IGauge(gauge).getReward(tokenId);
-        
-        // Calculate rewards claimed
-        aeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
-        
-        // Transfer rewards to user
-        if (aeroAmount > 0) {
-            IERC20(AERO).transfer(msg.sender, aeroAmount);
-            emit RewardsClaimed(msg.sender, tokenId, aeroAmount);
-        }
-        
-        return aeroAmount;
-    }
-
-    /**
-     * @notice Claims AERO rewards for all staked positions owned by an address
-     * @param owner The address to claim rewards for
-     * @return totalAeroAmount Total amount of AERO rewards claimed
-     * @dev Only the owner can claim their rewards
-     */
-    function claimAllRewards(address owner) 
-        external 
-        nonReentrant 
-        returns (uint256 totalAeroAmount) 
-    {
-        require(owner == msg.sender, "Can only claim own rewards");
-        
-        uint256[] memory positionIds = ownerPositionIds[owner];
-        uint256 positionCount = positionIds.length;
-        
-        if (positionCount == 0) {
-            return 0;
-        }
-        
-        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        
-        // Iterate through all positions and claim rewards
-        for (uint256 i = 0; i < positionCount; i++) {
-            uint256 tokenId = positionIds[i];
-            
-            // Get position details
-            (,, address token0, address token1, int24 tickSpacing,,,,,,,) = POSITION_MANAGER.positions(tokenId);
-            
-            // Find pool and gauge
-            address pool = address(0); // Pool lookup removed to save contract size
-            if (pool == address(0)) continue;
-            
-            address gauge = _findGaugeForPool(pool);
-            if (gauge == address(0)) continue;
-            
-            // Claim rewards from gauge
-            try IGauge(gauge).getReward(tokenId) {} catch {
-                // Continue if claim fails for this position
-                continue;
-            }
-        }
-        
-        // Calculate total rewards claimed
-        totalAeroAmount = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
-        
-        // Transfer all rewards to user
-        if (totalAeroAmount > 0) {
-            IERC20(AERO).transfer(owner, totalAeroAmount);
-            emit AllRewardsClaimed(owner, totalAeroAmount, positionCount);
-        }
-        
-        return totalAeroAmount;
-    }
 
     // ============ Public View Functions ============
 
@@ -938,7 +753,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
                 // Amount of token0 needed to get usdc1Equivalent worth of token1
                 // token0Amount = (usdc1Equivalent / token0Price) * 1e18 (adjusting for decimals)
-                uint256 token0Decimals = token0 == WETH ? 18 : (token0 == CBBTC ? 8 : 6);
+                uint256 token0Decimals = _getTokenDecimals(token0);
                 token0ForToken1 = (usdc1Equivalent * (10 ** token0Decimals)) / token0Price;
             }
 
@@ -1209,14 +1024,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         }
     }
 
-    function _findGaugeForPool(address pool) internal view returns (address gauge) {
-        try IVoter(VOTER).gauges(pool) returns (address g) {
-            gauge = g;
-        } catch {
-            gauge = address(0);
-        }
-    }
-
     function _getEffectiveSlippage(uint256 requestedSlippage) internal pure returns (uint256) {
         if (requestedSlippage == 0) {
             return DEFAULT_SLIPPAGE_BPS;
@@ -1225,26 +1032,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return requestedSlippage;
     }
 
-    /**
-     * @notice Removes a position ID from owner's tracking list
-     * @param owner The owner address
-     * @param tokenId The position ID to remove
-     */
-    function _removePositionFromOwner(address owner, uint256 tokenId) internal {
-        uint256 index = positionIdIndex[tokenId];
-        uint256 lastIndex = ownerPositionIds[owner].length - 1;
-
-        if (index != lastIndex) {
-            // Move the last element to the position being removed
-            uint256 lastTokenId = ownerPositionIds[owner][lastIndex];
-            ownerPositionIds[owner][index] = lastTokenId;
-            positionIdIndex[lastTokenId] = index;
-        }
-
-        // Remove the last element
-        ownerPositionIds[owner].pop();
-        delete positionIdIndex[tokenId];
-    }
 
     /**
      * @notice Calculates sqrt price from tick
@@ -1307,134 +1094,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
 
 
-    // ============ Admin Functions ============
-
-    /**
-     * @notice Emergency recovery for stuck staked positions
-     * @param tokenId The stuck position token ID
-     * @param pool The pool address
-     * @param recipient The address to send recovered funds to
-     * @return usdcOut Amount of USDC recovered
-     * @return aeroRewards Amount of AERO rewards recovered
-     * @dev Only for positions without ownership records
-     */
-    function emergencyRecoverStakedPosition(
-        uint256 tokenId,
-        address pool,
-        address recipient
-    )
-        external
-        returns (uint256 usdcOut, uint256 aeroRewards)
-    {
-        // Only the owner of the wallet registry can recover positions
-        if (address(walletRegistry) == address(0)) revert UnauthorizedAccess();
-        if (msg.sender != walletRegistry.owner()) revert UnauthorizedAccess();
-        if (stakedPositionOwners[tokenId] != address(0)) revert UnauthorizedAccess();
-
-        address gauge = _findGaugeForPool(pool);
-        if (gauge == address(0)) revert GaugeNotFound();
-
-        // Track AERO before withdrawal
-        uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-
-        // Withdraw from gauge
-        IGauge(gauge).withdraw(tokenId);
-        aeroRewards = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
-
-        // Get pool info
-        ICLPool clPool = ICLPool(pool);
-        address token0 = clPool.token0();
-        address token1 = clPool.token1();
-
-        // Get position info
-        (,,,,,,, uint128 liquidity,,,,) = POSITION_MANAGER.positions(tokenId);
-
-        // Collect fees
-        POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
-
-        // Remove liquidity
-        (uint256 amount0, uint256 amount1) = POSITION_MANAGER.decreaseLiquidity(
-            INonfungiblePositionManager.DecreaseLiquidityParams({
-                tokenId: tokenId,
-                liquidity: liquidity,
-                amount0Min: 0, // Emergency recovery, accept any amount
-                amount1Min: 0,
-                deadline: block.timestamp + 300
-            })
-        );
-
-        // Collect tokens
-        (amount0, amount1) = POSITION_MANAGER.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
-
-        // Burn the position
-        POSITION_MANAGER.burn(tokenId);
-
-        // Swap tokens to USDC if needed
-        if (token0 != USDC && amount0 > 0) {
-            usdcOut += _swapExactInputDirect(token0, USDC, amount0, pool, 500); // 5% slippage for emergency
-        } else if (token0 == USDC) {
-            usdcOut = amount0;
-        }
-
-        if (token1 != USDC && amount1 > 0) {
-            usdcOut += _swapExactInputDirect(token1, USDC, amount1, pool, 500); // 5% slippage for emergency
-        } else if (token1 == USDC) {
-            usdcOut += amount1;
-        }
-
-        // Transfer recovered funds
-        if (usdcOut > 0) {
-            IERC20(USDC).transfer(recipient, usdcOut);
-        }
-        if (aeroRewards > 0) {
-            IERC20(AERO).transfer(recipient, aeroRewards);
-        }
-
-        emit PositionClosed(recipient, tokenId, usdcOut, aeroRewards);
-    }
 
     // ============ External View Functions ============
 
-    /**
-     * @notice Returns the owner of a staked position
-     * @param tokenId The position NFT token ID
-     * @return owner The owner address (address(0) if not staked)
-     */
-    function getStakedPositionOwner(uint256 tokenId) external view returns (address owner) {
-        return stakedPositionOwners[tokenId];
-    }
-
-    /**
-     * @notice Checks if a position is staked through this contract
-     * @param tokenId The position NFT token ID
-     * @return isStaked True if the position is staked
-     */
-    function isPositionStaked(uint256 tokenId) external view returns (bool isStaked) {
-        return stakedPositionOwners[tokenId] != address(0);
-    }
-
-    /**
-     * @notice Returns all staked position IDs for a given owner
-     * @param owner The address to query positions for
-     * @return positionIds Array of position IDs staked by the owner
-     */
-    function getStakedPositions(address owner) external view returns (uint256[] memory positionIds) {
-        return ownerPositionIds[owner];
-    }
 
     /**
      * @notice Calculates tick range from percentage
@@ -1585,7 +1247,6 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         if (token == USDC) return 6;
         if (token == WETH) return 18;
         if (token == CBBTC) return 8;
-        if (token == AERO) return 18;
         
         try IERC20Metadata(token).decimals() returns (uint8 decimals) {
             return decimals;
