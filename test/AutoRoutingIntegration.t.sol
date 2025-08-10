@@ -89,8 +89,7 @@ contract AutoRoutingIntegrationTest is Test {
             rangePercentage,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
-            100, // 1% slippage
-            false // don't stake
+            100 // 1% slippage
         );
         
         vm.stopPrank();
@@ -116,14 +115,13 @@ contract AutoRoutingIntegrationTest is Test {
         // Approve USDC to LiquidityManager
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
-        // Create position with staking
+        // Create position
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             pool,
             rangePercentage,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
-            100, // 1% slippage
-            true // stake in gauge
+            100 // 1% slippage
         );
         
         vm.stopPrank();
@@ -132,9 +130,9 @@ contract AutoRoutingIntegrationTest is Test {
         assertTrue(tokenId > 0, "Token ID should be positive");
         assertTrue(liquidity > 0, "Liquidity should be positive");
         
-        // Verify position is tracked as staked
-        address stakedOwner = liquidityManager.getStakedPositionOwner(tokenId);
-        assertEq(stakedOwner, testUser, "User should be tracked as staked position owner");
+        // Verify position is owned by user (non-custodial)
+        address owner = INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId);
+        assertEq(owner, testUser, "User should own the position NFT directly");
     }
     
     function testCreatePositionAuto_ComplexRoute() public {
@@ -162,8 +160,7 @@ contract AutoRoutingIntegrationTest is Test {
             rangePercentage,
             block.timestamp + 3600,
             500e6, // 500 USDC
-            200, // 2% slippage for complex route
-            false
+            200 // 2% slippage for complex route
         );
         
         vm.stopPrank();
@@ -192,8 +189,7 @@ contract AutoRoutingIntegrationTest is Test {
             rangePercentage,
             block.timestamp + 3600,
             1000e6,
-            100,
-            false
+            100
         );
         
         // Approve NFT to LiquidityManager for closing
@@ -248,8 +244,7 @@ contract AutoRoutingIntegrationTest is Test {
             tickUpper,
             block.timestamp + 3600,
             1000e6,
-            100,
-            false
+            100
         );
         
         vm.stopPrank();
@@ -272,8 +267,7 @@ contract AutoRoutingIntegrationTest is Test {
             rangePercentage,
             block.timestamp + 3600,
             100000e6, // 100,000 USDC (more than user has)
-            100,
-            false
+            100
         );
         
         vm.stopPrank();
@@ -297,8 +291,7 @@ contract AutoRoutingIntegrationTest is Test {
             rangePercentage,
             block.timestamp + 3600,
             100e6,
-            100,
-            false
+            100
         );
         uint256 gasUsedAuto = gasStart - gasleft();
         

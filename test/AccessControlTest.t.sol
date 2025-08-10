@@ -35,8 +35,7 @@ contract AccessControlTest is Test {
             50, // rangePercentage
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
-            100, // slippageBps
-            false // stake
+            100 // slippageBps
         ) {
             // Expected to fail due to invalid pool, but access control should pass
         } catch {
@@ -52,8 +51,7 @@ contract AccessControlTest is Test {
             50, // rangePercentage
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
-            100, // slippageBps
-            false // stake
+            100 // slippageBps
         );
     }
     
@@ -65,8 +63,7 @@ contract AccessControlTest is Test {
             50, // rangePercentage
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
-            100, // slippageBps
-            false // stake
+            100 // slippageBps
         );
     }
     
@@ -96,8 +93,7 @@ contract AccessControlTest is Test {
             50, // rangePercentage
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
-            100, // slippageBps
-            false // stake
+            100 // slippageBps
         ) {
             // Expected to fail due to invalid pool, but access control should pass
         } catch {

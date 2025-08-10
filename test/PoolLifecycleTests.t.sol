@@ -13,8 +13,9 @@ import "../interfaces/IGauge.sol";
 
 /**
  * @title PoolLifecycleTests
- * @notice Comprehensive lifecycle tests for specific pools
- * @dev Tests full position lifecycle: create → stake → claim rewards → unstake → close
+ * @notice Comprehensive lifecycle tests for specific pools with non-custodial approach
+ * @dev Tests position lifecycle: create (direct to user) → close (with user approval)
+ * @dev Non-custodial: Users maintain ownership of NFT positions at all times
  */
 contract PoolLifecycleTests is Test {
     LiquidityManager public liquidityManager;
@@ -125,14 +126,13 @@ contract PoolLifecycleTests is Test {
         uint256 usdcBefore = IERC20(USDC).balanceOf(alice);
         console.log("Alice USDC before:", usdcBefore / 1e6, "USDC");
         
-        // Create position with auto-routing and staking
+        // Create position with auto-routing
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             WETH_NEURO_POOL,
             rangePercentage,
             block.timestamp + 3600,
             2000e6, // 2000 USDC
-            500,    // 5% slippage for exotic pairs
-            true    // stake in gauge
+            500     // 5% slippage for exotic pairs
         );
         
         console.log("Position created!");
@@ -142,28 +142,24 @@ contract PoolLifecycleTests is Test {
         uint256 usdcAfter = IERC20(USDC).balanceOf(alice);
         console.log("  USDC spent:", (usdcBefore - usdcAfter) / 1e6, "USDC");
         
-        // Verify position is staked
-        address gauge = _getGauge(WETH_NEURO_POOL);
-        if (gauge != address(0)) {
-            address stakedOwner = liquidityManager.getStakedPositionOwner(tokenId);
-            assertEq(stakedOwner, alice, "Alice should be the staked position owner");
-            console.log("  Position is staked in gauge:", gauge);
-        } else {
-            console.log("  Warning: No gauge found for this pool");
-        }
+        // Verify position is owned by Alice (non-custodial)
+        address nftOwner = INonfungiblePositionManager(POSITION_MANAGER).ownerOf(tokenId);
+        assertEq(nftOwner, alice, "Alice should own the position NFT directly");
+        console.log("  Position NFT is owned by Alice (non-custodial)");
         
         // Advance time to accumulate rewards
         console.log("\n--- Step 2: Accumulate Rewards ---");
         vm.warp(block.timestamp + 7 days);
         console.log("  Advanced 7 days");
         
-        // Check if there are any claimable rewards
-        if (gauge != address(0)) {
-            // Check if gauge exists but don't call earned() as it requires tokenId
-            console.log("  Gauge active, rewards accumulating...");
-        }
+        // Note: Since positions are non-custodial, users manage their own staking/rewards
+        console.log("  Users can stake their positions directly if desired");
         
-        console.log("\n--- Step 3: Close Position and Claim Rewards ---");
+        console.log("\n--- Step 3: Close Position ---");
+        
+        // IMPORTANT: Alice must approve the LiquidityManager to transfer her NFT
+        INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), tokenId);
+        console.log("  Alice approved LiquidityManager to transfer NFT");
         
         uint256 usdcBeforeClose = IERC20(USDC).balanceOf(alice);
         uint256 aeroBeforeClose = IERC20(AERO).balanceOf(alice);
@@ -181,13 +177,14 @@ contract PoolLifecycleTests is Test {
         
         console.log("Position closed!");
         console.log("  USDC received:", usdcOut / 1e6, "USDC");
-        console.log("  AERO rewards:", aeroRewards / 1e18, "AERO");
+        console.log("  AERO rewards:", aeroRewards / 1e18, "AERO (should be 0 - non-custodial)");
         
         uint256 usdcAfterClose = IERC20(USDC).balanceOf(alice);
         uint256 aeroAfterClose = IERC20(AERO).balanceOf(alice);
         
         assertEq(usdcAfterClose - usdcBeforeClose, usdcOut, "USDC balance should increase by usdcOut");
-        assertEq(aeroAfterClose - aeroBeforeClose, aeroRewards, "AERO balance should increase by rewards");
+        assertEq(aeroRewards, 0, "AERO rewards should be 0 in non-custodial design");
+        assertEq(aeroAfterClose, aeroBeforeClose, "AERO balance should not change");
         
         // Calculate PnL
         int256 pnl = int256(usdcAfterClose) - int256(usdcBefore);
@@ -197,7 +194,7 @@ contract PoolLifecycleTests is Test {
         } else {
             console.log("  Net PnL: -", uint256(-pnl) / 1e6, "USDC");
         }
-        console.log("  AERO earned:", aeroRewards / 1e18, "AERO");
+        console.log("  Note: No AERO rewards in non-custodial design");
         
         vm.stopPrank();
         
@@ -249,15 +246,14 @@ contract PoolLifecycleTests is Test {
         uint256 usdcBefore = IERC20(USDC).balanceOf(bob);
         console.log("Bob USDC before:", usdcBefore / 1e6, "USDC");
         
-        // Create position with auto-routing, no staking
+        // Create position with auto-routing
         // Use type(uint256).max for deadline to avoid timestamp issues with fork
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             USDC_AERO_POOL,
             rangePercentage,
             type(uint256).max, // max deadline to avoid fork timestamp issues
             3000e6, // 3000 USDC
-            500,    // 5% slippage
-            false   // don't stake
+            500     // 5% slippage
         );
         
         console.log("Position created!");
@@ -284,10 +280,8 @@ contract PoolLifecycleTests is Test {
         console.log("\n--- Step 3: Add More Liquidity (Compound) ---");
         
         // Bob adds more liquidity to existing position
-        console.log("  Bob adds 1000 more USDC to position...");
-        
-        // For this test, we'll just close and recreate with more capital
-        // (In production, you'd use increaseLiquidity function)
+        console.log("  Bob could add more liquidity if desired");
+        console.log("  (Users manage their own positions in non-custodial design)");
         
         console.log("\n--- Step 4: Close Position ---");
         
@@ -354,8 +348,7 @@ contract PoolLifecycleTests is Test {
             rangePercentage,
             block.timestamp + 3600,
             1000e6,
-            500,    // 5% slippage
-            true // stake
+            500     // 5% slippage
         );
         console.log("  Alice Token ID:", aliceTokenId);
         vm.stopPrank();
@@ -369,22 +362,21 @@ contract PoolLifecycleTests is Test {
             rangePercentage,
             block.timestamp + 3600,
             1500e6,
-            500,    // 5% slippage
-            true // stake
+            500     // 5% slippage
         );
         console.log("  Bob Token ID:", bobTokenId);
         vm.stopPrank();
         
-        // Verify both positions are tracked correctly
-        address aliceStakedOwner = liquidityManager.getStakedPositionOwner(aliceTokenId);
-        address bobStakedOwner = liquidityManager.getStakedPositionOwner(bobTokenId);
+        // Verify both positions are owned directly by users (non-custodial)
+        address alicePositionOwner = INonfungiblePositionManager(POSITION_MANAGER).ownerOf(aliceTokenId);
+        address bobPositionOwner = INonfungiblePositionManager(POSITION_MANAGER).ownerOf(bobTokenId);
         
-        assertEq(aliceStakedOwner, alice, "Alice should own her staked position");
-        assertEq(bobStakedOwner, bob, "Bob should own his staked position");
+        assertEq(alicePositionOwner, alice, "Alice should own her position NFT directly");
+        assertEq(bobPositionOwner, bob, "Bob should own his position NFT directly");
         
-        console.log("\n--- Both positions staked successfully ---");
-        console.log("  Alice owns position:", aliceTokenId);
-        console.log("  Bob owns position:", bobTokenId);
+        console.log("\n--- Both positions created successfully (non-custodial) ---");
+        console.log("  Alice owns position NFT:", aliceTokenId);
+        console.log("  Bob owns position NFT:", bobTokenId);
         
         // Advance time for rewards
         vm.warp(block.timestamp + 5 days);
@@ -392,6 +384,8 @@ contract PoolLifecycleTests is Test {
         // Alice closes her position
         console.log("\n--- Alice closes position ---");
         vm.startPrank(alice);
+        // First approve the NFT to LiquidityManager
+        INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), aliceTokenId);
         (uint256 aliceUsdcOut, uint256 aliceAero) = liquidityManager.closePosition(
             aliceTokenId,
             WETH_NEURO_POOL,
@@ -400,15 +394,18 @@ contract PoolLifecycleTests is Test {
             500     // 5% slippage
         );
         console.log("  Alice received:", aliceUsdcOut / 1e6, "USDC");
-        console.log("  Alice AERO rewards:", aliceAero / 1e18, "AERO");
+        console.log("  Alice AERO rewards:", aliceAero / 1e18, "AERO (always 0 - non-custodial)");
         vm.stopPrank();
         
-        // Bob's position should still be active
-        assertTrue(liquidityManager.isPositionStaked(bobTokenId), "Bob's position should still be staked");
+        // Bob's position should still exist (owned by Bob)
+        address bobOwner = INonfungiblePositionManager(POSITION_MANAGER).ownerOf(bobTokenId);
+        assertEq(bobOwner, bob, "Bob should still own his position NFT");
         
         // Bob closes his position
         console.log("\n--- Bob closes position ---");
         vm.startPrank(bob);
+        // First approve the NFT to LiquidityManager
+        INonfungiblePositionManager(POSITION_MANAGER).approve(address(liquidityManager), bobTokenId);
         (uint256 bobUsdcOut, uint256 bobAero) = liquidityManager.closePosition(
             bobTokenId,
             WETH_NEURO_POOL,
@@ -417,7 +414,7 @@ contract PoolLifecycleTests is Test {
             500     // 5% slippage
         );
         console.log("  Bob received:", bobUsdcOut / 1e6, "USDC");
-        console.log("  Bob AERO rewards:", bobAero / 1e18, "AERO");
+        console.log("  Bob AERO rewards:", bobAero / 1e18, "AERO (always 0 - non-custodial)");
         vm.stopPrank();
         
         console.log("\n--- Test completed successfully ---");
@@ -440,8 +437,7 @@ contract PoolLifecycleTests is Test {
             rangePercentage,
             block.timestamp + 3600,
             100000e6, // More than Alice has
-            100,
-            false
+            100
         );
         console.log("  [OK] Reverted as expected");
         
@@ -452,8 +448,7 @@ contract PoolLifecycleTests is Test {
             0, // Invalid: 0% range
             block.timestamp + 3600,
             1000e6,
-            100,
-            false
+            100
         );
         console.log("  [OK] Reverted as expected");
         
@@ -464,8 +459,7 @@ contract PoolLifecycleTests is Test {
             rangePercentage,
             block.timestamp - 1, // Past deadline
             1000e6,
-            100,
-            false
+            100
         );
         console.log("  [OK] Reverted as expected");
         
