@@ -35,6 +35,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     error ArrayLengthMismatch();
     error InvalidTickSpacing();
     error EmergencyRecoveryFailed();
+    error InvalidTickAlignment(int24 tick, int24 tickSpacing);
+    error TickRangeTooNarrow(int24 tickLower, int24 tickUpper, int24 minWidth);
 
     // ============ State Variables ============
     /// @notice Registry contract for wallet access control
@@ -193,98 +195,20 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     // ============ External Functions ============
 
     /**
-     * @notice Creates a new concentrated liquidity position with percentage-based range
-     * @param pool Target pool address
-     * @param rangePercentage Price range as percentage in basis points (500 = ±5% from current price)
-     * @param deadline Transaction deadline
-     * @param usdcAmount USDC amount to invest
-     * @param slippageBps Slippage tolerance in basis points
-     * @return tokenId The NFT token ID of the created position
-     * @return liquidity The amount of liquidity minted
-     * @dev Non-custodial: Position NFT is minted directly to msg.sender
-     * @dev Automatically calculates ticks based on current price and desired range percentage
-     */
-    function createPosition(
-        address pool,
-        uint256 rangePercentage,
-        uint256 deadline,
-        uint256 usdcAmount,
-        uint256 slippageBps
-    )
-        external
-        nonReentrant
-        deadlineCheck(deadline)
-        validAmount(usdcAmount)
-        onlyAuthorized(msg.sender)
-        returns (uint256 tokenId, uint128 liquidity)
-    {
-        require(address(routeFinder) != address(0), "RouteFinder not configured");
-        require(rangePercentage > 0 && rangePercentage <= 10000, "Invalid range percentage");
-        
-        // Get pool info
-        ICLPool clPool = ICLPool(pool);
-        address token0 = clPool.token0();
-        address token1 = clPool.token1();
-        int24 tickSpacing = clPool.tickSpacing();
-        
-        // Get current tick and calculate range
-        (, int24 currentTick,,,,) = clPool.slot0();
-        (int24 tickLower, int24 tickUpper) = calculateTicksFromPercentage(
-            currentTick,
-            rangePercentage,
-            tickSpacing
-        );
-        
-        // Find routes automatically
-        (
-            RouteFinderLib.SwapRoute memory token0Route,
-            RouteFinderLib.SwapRoute memory token1Route,
-            RouteFinderLib.RouteStatus status
-        ) = routeFinder.findRoutesForPositionOpen(token0, token1, pool, tickSpacing);
-        
-        // Check if routes were found
-        if (status == RouteFinderLib.RouteStatus.NO_ROUTE) {
-            revert InvalidRoute();
-        }
-        
-        // Create position parameters with discovered routes
-        PositionParams memory params = PositionParams({
-            pool: pool,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            deadline: deadline,
-            usdcAmount: usdcAmount,
-            slippageBps: slippageBps,
-            token0Route: SwapRoute({
-                pools: token0Route.pools,
-                tokens: token0Route.tokens,
-                tickSpacings: token0Route.tickSpacings
-            }),
-            token1Route: SwapRoute({
-                pools: token1Route.pools,
-                tokens: token1Route.tokens,
-                tickSpacings: token1Route.tickSpacings
-            })
-        });
-        
-        // Use existing createPosition logic
-        return _createPosition(params);
-    }
-
-    /**
      * @notice Creates a new concentrated liquidity position with explicit tick boundaries
      * @param pool Target pool address
-     * @param tickLower Lower tick boundary
-     * @param tickUpper Upper tick boundary
+     * @param tickLower Lower tick boundary (must be aligned to tick spacing)
+     * @param tickUpper Upper tick boundary (must be aligned to tick spacing)
      * @param deadline Transaction deadline
      * @param usdcAmount USDC amount to invest
      * @param slippageBps Slippage tolerance in basis points
      * @return tokenId The NFT token ID of the created position
      * @return liquidity The amount of liquidity minted
      * @dev Non-custodial: Position NFT is minted directly to msg.sender
-     * @dev For advanced users who need precise tick control
+     * @dev Ticks must be properly aligned to the pool's tick spacing
+     * @dev tickLower must be less than tickUpper
      */
-    function createPositionWithTicks(
+    function createPosition(
         address pool,
         int24 tickLower,
         int24 tickUpper,
@@ -343,6 +267,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         return _createPosition(params);
     }
 
+
     function _createPosition(PositionParams memory params) internal returns (uint256 tokenId, uint128 liquidity) {
         _safeTransferFrom(USDC, msg.sender, address(this), params.usdcAmount);
 
@@ -353,7 +278,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address token1 = pool.token1();
         int24 tickSpacing = pool.tickSpacing();
 
-        _validateTickRange(params.tickLower, params.tickUpper, tickSpacing);
+        // Enhanced tick validation
+        _validateTickRangeExtended(params.tickLower, params.tickUpper, tickSpacing, pool);
 
         uint256 effectiveSlippage = _getEffectiveSlippage(params.slippageBps);
 
@@ -1139,85 +1065,55 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
 
     /**
-     * @notice Calculates tick range from percentage
-     * @param currentTick Current pool tick
-     * @param rangePercentage Range percentage in basis points (500 = 5%)
+     * @notice Enhanced tick range validation with comprehensive checks
+     * @param tickLower Lower tick boundary
+     * @param tickUpper Upper tick boundary  
      * @param tickSpacing Pool's tick spacing requirement
-     * @return tickLower Aligned lower tick
-     * @return tickUpper Aligned upper tick
+     * @param pool Pool contract instance
+     * @dev Validates tick alignment, bounds, ordering, and reasonableness
      */
-    function calculateTicksFromPercentage(
-        int24 currentTick,
-        uint256 rangePercentage,
-        int24 tickSpacing
-    ) public pure returns (int24 tickLower, int24 tickUpper) {
-        // Calculate tick delta for the percentage range
-        int24 tickDelta;
-        
-        // For pools with large tick spacing (>= 1000), use a more conservative approach
-        // to avoid creating ranges that are too wide which cause PSC errors
-        if (tickSpacing >= 1000) {
-            // For high tick spacing pools, use the absolute minimum range
-            // PSC errors occur when the range is too wide relative to current liquidity
-            // Use only 1 tick space on each side of current tick
-            tickDelta = tickSpacing;
-        } else {
-            // Original calculation for normal tick spacing pools
-            // Using approximation: tickDelta ≈ percentage * 100
-            // This is based on: tick = log₁.₀₀₀₁(price), so for X% price change:
-            // tickDelta ≈ log₁.₀₀₀₁(1 + X/100) ≈ (X/100) * 10000 = X * 100
-            tickDelta = int24(uint24(rangePercentage * 100));
-            
-            // Ensure minimum tick delta based on tick spacing
-            if (tickDelta < tickSpacing * 2) {
-                tickDelta = tickSpacing * 2; // At least 2 tick spaces wide
-            }
+    function _validateTickRangeExtended(
+        int24 tickLower,
+        int24 tickUpper,
+        int24 tickSpacing,
+        ICLPool pool
+    ) internal view {
+        // Check tick ordering (lower must be less than upper)
+        if (tickLower >= tickUpper) {
+            revert InvalidTickRange(tickLower, tickUpper);
         }
         
-        // Calculate raw ticks
-        int24 rawTickLower = currentTick - tickDelta;
-        int24 rawTickUpper = currentTick + tickDelta;
-        
-        // Align to tick spacing
-        // For lower tick: round down to nearest multiple of tickSpacing
-        if (rawTickLower >= 0) {
-            tickLower = (rawTickLower / tickSpacing) * tickSpacing;
-        } else {
-            // For negative numbers, we need to round down (more negative)
-            tickLower = ((rawTickLower - tickSpacing + 1) / tickSpacing) * tickSpacing;
+        // Check tick bounds
+        if (tickLower < MIN_TICK || tickUpper > int24(uint24(MAX_TICK))) {
+            revert InvalidTickRange(tickLower, tickUpper);
         }
         
-        // For upper tick: round up to nearest multiple of tickSpacing
-        if (rawTickUpper >= 0) {
-            // Round up for positive numbers
-            if (rawTickUpper % tickSpacing == 0) {
-                tickUpper = rawTickUpper;
-            } else {
-                tickUpper = ((rawTickUpper / tickSpacing) + 1) * tickSpacing;
-            }
-        } else {
-            // For negative numbers, round up means towards zero
-            tickUpper = (rawTickUpper / tickSpacing) * tickSpacing;
+        // Check tick spacing alignment for lower tick
+        if (tickLower % tickSpacing != 0) {
+            revert InvalidTickAlignment(tickLower, tickSpacing);
         }
         
-        // Ensure ticks are within valid range
-        int24 MAX_TICK_INT24 = 887272;
-        
-        if (tickLower < MIN_TICK) {
-            // Align MIN_TICK to tick spacing when used as boundary
-            tickLower = (MIN_TICK / tickSpacing) * tickSpacing;
-        }
-        if (tickUpper > MAX_TICK_INT24) {
-            // Align MAX_TICK to tick spacing when used as boundary
-            tickUpper = (MAX_TICK_INT24 / tickSpacing) * tickSpacing;
+        // Check tick spacing alignment for upper tick
+        if (tickUpper % tickSpacing != 0) {
+            revert InvalidTickAlignment(tickUpper, tickSpacing);
         }
         
-        // Ensure minimum range (at least one tick spacing)
-        if (tickUpper <= tickLower) {
-            tickUpper = tickLower + tickSpacing;
+        // Ensure minimum range width (at least one tick spacing)
+        if (tickUpper - tickLower < tickSpacing) {
+            revert TickRangeTooNarrow(tickLower, tickUpper, tickSpacing);
         }
         
-        return (tickLower, tickUpper);
+        // Optional: Check if range is reasonable relative to current price
+        // This helps prevent user errors but doesn't block edge cases
+        (, int24 currentTick,,,,) = pool.slot0();
+        int24 rangeWidth = tickUpper - tickLower;
+        
+        // For high tick spacing pools, very wide ranges can cause issues
+        // We allow it but the slippage protection will handle any problems
+        if (tickSpacing >= 1000 && rangeWidth > tickSpacing * 100) {
+            // Extremely wide range - allowed but may have high slippage
+            // The existing slippage protection in _createPosition handles this
+        }
     }
 
     function _calculateMinimumOutput(

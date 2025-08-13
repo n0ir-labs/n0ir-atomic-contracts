@@ -32,7 +32,8 @@ contract AccessControlTest is Test {
         // Should not revert - registered wallet can call
         try liquidityManager.createPosition(
             address(0), // pool
-            50, // rangePercentage
+            -1000, // tickLower
+            1000, // tickUpper
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
             100 // slippageBps
@@ -48,7 +49,8 @@ contract AccessControlTest is Test {
         vm.expectRevert(LiquidityManager.UnauthorizedAccess.selector);
         liquidityManager.createPosition(
             address(0), // pool
-            50, // rangePercentage
+            -1000, // tickLower
+            1000, // tickUpper
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
             100 // slippageBps
@@ -60,7 +62,8 @@ contract AccessControlTest is Test {
         vm.expectRevert(LiquidityManager.UnauthorizedAccess.selector);
         liquidityManager.createPosition(
             address(0), // pool
-            50, // rangePercentage
+            -1000, // tickLower
+            1000, // tickUpper
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
             100 // slippageBps
@@ -90,7 +93,8 @@ contract AccessControlTest is Test {
         vm.prank(randomUser);
         try permissionlessManager.createPosition(
             address(0), // pool
-            50, // rangePercentage
+            -1000, // tickLower
+            1000, // tickUpper
             block.timestamp + 1, // deadline
             1000e6, // usdcAmount
             100 // slippageBps

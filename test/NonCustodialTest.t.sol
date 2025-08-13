@@ -64,10 +64,18 @@ contract NonCustodialTest is Test {
         // Approve USDC to LiquidityManager
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
         
+        // Get current tick and calculate range
+        ICLPool pool = ICLPool(USDC_AERO_POOL);
+        (, int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        int24 tickLower = ((currentTick - 1000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1000) / tickSpacing) * tickSpacing;
+        
         // Create position
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             USDC_AERO_POOL,
-            100,    // 1% range
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
             500     // 5% slippage
@@ -101,9 +109,18 @@ contract NonCustodialTest is Test {
         
         // First create a position
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
+        
+        // Get current tick and calculate range
+        ICLPool pool = ICLPool(USDC_AERO_POOL);
+        (, int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        int24 tickLower = ((currentTick - 1000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1000) / tickSpacing) * tickSpacing;
+        
         (uint256 tokenId,) = liquidityManager.createPosition(
             USDC_AERO_POOL,
-            100,    // 1% range
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
             500     // 5% slippage
@@ -155,9 +172,18 @@ contract NonCustodialTest is Test {
         
         // Create a position
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
+        
+        // Get current tick and calculate range
+        ICLPool pool = ICLPool(USDC_AERO_POOL);
+        (, int24 currentTick,,,,) = pool.slot0();
+        int24 tickSpacing = pool.tickSpacing();
+        int24 tickLower = ((currentTick - 1000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1000) / tickSpacing) * tickSpacing;
+        
         (uint256 tokenId,) = liquidityManager.createPosition(
             USDC_AERO_POOL,
-            100,    // 1% range
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             1000e6, // 1000 USDC
             500     // slippage

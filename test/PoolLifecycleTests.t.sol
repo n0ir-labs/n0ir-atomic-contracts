@@ -102,11 +102,13 @@ contract PoolLifecycleTests is Test {
         console.log("Current Tick:", currentTick);
         console.log("Tick Spacing:", tickSpacing);
         
-        // Use percentage-based range (2% = 200 basis points)
-        uint256 rangePercentage = 200; // 2% range
+        // Calculate tick range (2% range)
+        int24 tickLower = ((currentTick - 2000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 2000) / tickSpacing) * tickSpacing;
         
         console.log("\n--- Step 1: Create and Stake Position ---");
-        console.log("Range percentage: +/-", rangePercentage / 100, "%");
+        console.log("Tick Lower:", tickLower);
+        console.log("Tick Upper:", tickUpper);
         
         vm.startPrank(alice);
         
@@ -119,7 +121,8 @@ contract PoolLifecycleTests is Test {
         // Create position with auto-routing
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             WETH_NEURO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             2000e6, // 2000 USDC
             500     // 5% slippage for exotic pairs
@@ -206,21 +209,15 @@ contract PoolLifecycleTests is Test {
         console.log("Current Tick:", currentTick);
         console.log("Tick Spacing:", tickSpacing);
         
-        // For high tick spacing pools, use a lower slippage tolerance
-        // to avoid large price movements during swaps
-        uint256 rangePercentage = 100; // 1% range for tighter liquidity
-        
-        // Calculate and log the tick range that will be used
-        (int24 calcTickLower, int24 calcTickUpper) = liquidityManager.calculateTicksFromPercentage(
-            currentTick, rangePercentage, tickSpacing
-        );
+        // Calculate tick range (1% range for tighter liquidity)
+        int24 tickLower = ((currentTick - 1000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1000) / tickSpacing) * tickSpacing;
         
         console.log("\n--- Step 1: Create Position Without Staking ---");
-        console.log("Range percentage: +/-", rangePercentage / 100, "%");
-        console.log("Calculated tickLower:", calcTickLower);
-        console.log("Calculated tickUpper:", calcTickUpper);
-        console.log("Range width in ticks:", uint24(calcTickUpper - calcTickLower));
-        console.log("Range width in tick spaces:", uint24(calcTickUpper - calcTickLower) / uint24(tickSpacing));
+        console.log("Tick Lower:", tickLower);
+        console.log("Tick Upper:", tickUpper);
+        console.log("Range width in ticks:", uint24(tickUpper - tickLower));
+        console.log("Range width in tick spaces:", uint24(tickUpper - tickLower) / uint24(tickSpacing));
         
         vm.startPrank(bob);
         
@@ -234,7 +231,8 @@ contract PoolLifecycleTests is Test {
         // Use type(uint256).max for deadline to avoid timestamp issues with fork
         (uint256 tokenId, uint128 liquidity) = liquidityManager.createPosition(
             USDC_AERO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             type(uint256).max, // max deadline to avoid fork timestamp issues
             3000e6, // 3000 USDC
             500     // 5% slippage
@@ -315,10 +313,14 @@ contract PoolLifecycleTests is Test {
     function testMultipleUsersWETH_NEURO() public {
         console.log("\n=== Multiple Users WETH/NEURO Pool Test ===");
         
-        // Both users create positions with same percentage range
-        uint256 rangePercentage = 150; // 1.5% range
+        // Get current tick and calculate range
+        int24 currentTick = _getCurrentTick(WETH_NEURO_POOL);
+        int24 tickSpacing = _getTickSpacing(WETH_NEURO_POOL);
+        int24 tickLower = ((currentTick - 1500) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1500) / tickSpacing) * tickSpacing;
         
-        console.log("Range percentage: +/- 1.5%");
+        console.log("Tick Lower:", tickLower);
+        console.log("Tick Upper:", tickUpper);
         
         console.log("\n--- Alice creates position ---");
         vm.startPrank(alice);
@@ -326,7 +328,8 @@ contract PoolLifecycleTests is Test {
         
         (uint256 aliceTokenId,) = liquidityManager.createPosition(
             WETH_NEURO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             1000e6,
             500     // 5% slippage
@@ -340,7 +343,8 @@ contract PoolLifecycleTests is Test {
         
         (uint256 bobTokenId,) = liquidityManager.createPosition(
             WETH_NEURO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             1500e6,
             500     // 5% slippage
@@ -404,7 +408,11 @@ contract PoolLifecycleTests is Test {
     function testErrorCases() public {
         console.log("\n=== Error Cases Test ===");
         
-        uint256 rangePercentage = 100; // 1% range
+        // Get pool tick info
+        int24 currentTick = _getCurrentTick(USDC_AERO_POOL);
+        int24 tickSpacing = _getTickSpacing(USDC_AERO_POOL);
+        int24 tickLower = ((currentTick - 1000) / tickSpacing) * tickSpacing;
+        int24 tickUpper = ((currentTick + 1000) / tickSpacing) * tickSpacing;
         
         vm.startPrank(alice);
         IERC20(USDC).approve(address(liquidityManager), type(uint256).max);
@@ -413,18 +421,20 @@ contract PoolLifecycleTests is Test {
         vm.expectRevert();
         liquidityManager.createPosition(
             USDC_AERO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             block.timestamp + 3600,
             100000e6, // More than Alice has
             100
         );
         console.log("  [OK] Reverted as expected");
         
-        console.log("\n--- Test: Invalid range percentage ---");
+        console.log("\n--- Test: Invalid tick range (lower >= upper) ---");
         vm.expectRevert();
         liquidityManager.createPosition(
             USDC_AERO_POOL,
-            0, // Invalid: 0% range
+            tickUpper, // Swap them - invalid
+            tickLower,
             block.timestamp + 3600,
             1000e6,
             100
@@ -435,7 +445,8 @@ contract PoolLifecycleTests is Test {
         vm.expectRevert();
         liquidityManager.createPosition(
             USDC_AERO_POOL,
-            rangePercentage,
+            tickLower,
+            tickUpper,
             block.timestamp - 1, // Past deadline
             1000e6,
             100
