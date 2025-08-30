@@ -315,9 +315,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             if (token0 != USDC) {
                 if (usdc0 > 0) {
                     if (params.token0Route.pools.length > 0) {
-                        amount0 = _executeSwapWithRoute(USDC, token0, usdc0, params.token0Route, effectiveSlippage);
+                        amount0 = _executeSwapWithRoute(USDC, token0, usdc0, params.token0Route, effectiveSlippage, params.deadline);
                     } else {
-                        amount0 = _swapExactInputDirect(USDC, token0, usdc0, params.pool, effectiveSlippage);
+                        amount0 = _swapExactInputDirect(USDC, token0, usdc0, params.pool, effectiveSlippage, params.deadline);
                     }
                 } else {
                     amount0 = 0;
@@ -330,9 +330,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             if (token1 != USDC) {
                 if (usdc1 > 0) {
                     if (params.token1Route.pools.length > 0) {
-                        amount1 = _executeSwapWithRoute(USDC, token1, usdc1, params.token1Route, effectiveSlippage);
+                        amount1 = _executeSwapWithRoute(USDC, token1, usdc1, params.token1Route, effectiveSlippage, params.deadline);
                     } else {
-                        amount1 = _swapExactInputDirect(USDC, token1, usdc1, params.pool, effectiveSlippage);
+                        amount1 = _swapExactInputDirect(USDC, token1, usdc1, params.pool, effectiveSlippage, params.deadline);
                     }
                 } else {
                     amount1 = 0;
@@ -513,9 +513,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         if (token0 != USDC && amount0 > 0) {
             if (params.token0Route.pools.length > 0) {
-                usdcOut += _executeSwapWithRoute(token0, USDC, amount0, params.token0Route, effectiveSlippage);
+                usdcOut += _executeSwapWithRoute(token0, USDC, amount0, params.token0Route, effectiveSlippage, params.deadline);
             } else {
-                usdcOut += _swapExactInputDirect(token0, USDC, amount0, params.pool, effectiveSlippage);
+                usdcOut += _swapExactInputDirect(token0, USDC, amount0, params.pool, effectiveSlippage, params.deadline);
             }
         } else if (token0 == USDC) {
             usdcOut += amount0;
@@ -523,9 +523,9 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         if (token1 != USDC && amount1 > 0) {
             if (params.token1Route.pools.length > 0) {
-                usdcOut += _executeSwapWithRoute(token1, USDC, amount1, params.token1Route, effectiveSlippage);
+                usdcOut += _executeSwapWithRoute(token1, USDC, amount1, params.token1Route, effectiveSlippage, params.deadline);
             } else {
-                usdcOut += _swapExactInputDirect(token1, USDC, amount1, params.pool, effectiveSlippage);
+                usdcOut += _swapExactInputDirect(token1, USDC, amount1, params.pool, effectiveSlippage, params.deadline);
             }
         } else if (token1 == USDC) {
             usdcOut += amount1;
@@ -714,15 +714,15 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             // Swap all USDC to token0
             uint256 totalToken0;
             if (params.token0Route.pools.length > 0) {
-                totalToken0 = _executeSwapWithRoute(USDC, token0, totalUsdcForToken0, params.token0Route, slippageBps);
+                totalToken0 = _executeSwapWithRoute(USDC, token0, totalUsdcForToken0, params.token0Route, slippageBps, params.deadline);
             } else {
-                totalToken0 = _swapExactInputDirect(USDC, token0, totalUsdcForToken0, params.pool, slippageBps);
+                totalToken0 = _swapExactInputDirect(USDC, token0, totalUsdcForToken0, params.pool, slippageBps, params.deadline);
             }
 
             // Now split token0: some for position, some to swap to token1
             if (token1 != USDC && token0ForToken1 > 0 && token0ForToken1 < totalToken0) {
                 // Swap portion of token0 to token1
-                amount1 = _swapExactInputDirect(token0, token1, token0ForToken1, params.pool, slippageBps);
+                amount1 = _swapExactInputDirect(token0, token1, token0ForToken1, params.pool, slippageBps, params.deadline);
                 amount0 = totalToken0 - token0ForToken1;
             } else if (token1 == USDC) {
                 // token1 is USDC, no swap needed for it
@@ -731,7 +731,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             } else {
                 // Edge case: use half for each
                 uint256 halfToken0 = totalToken0 / 2;
-                amount1 = _swapExactInputDirect(token0, token1, halfToken0, params.pool, slippageBps);
+                amount1 = _swapExactInputDirect(token0, token1, halfToken0, params.pool, slippageBps, params.deadline);
                 amount0 = totalToken0 - halfToken0;
             }
         } else {
@@ -740,13 +740,13 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             uint256 half = params.usdcAmount / 2;
 
             if (token0 != USDC) {
-                amount0 = _executeSwapWithRoute(USDC, token0, half, params.token0Route, slippageBps);
+                amount0 = _executeSwapWithRoute(USDC, token0, half, params.token0Route, slippageBps, params.deadline);
             } else {
                 amount0 = half;
             }
 
             if (token1 != USDC) {
-                amount1 = _executeSwapWithRoute(USDC, token1, params.usdcAmount - half, params.token1Route, slippageBps);
+                amount1 = _executeSwapWithRoute(USDC, token1, params.usdcAmount - half, params.token1Route, slippageBps, params.deadline);
             } else {
                 amount1 = params.usdcAmount - half;
             }
@@ -872,7 +872,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address tokenOut,
         uint256 amountIn,
         address pool,
-        uint256 slippageBps
+        uint256 slippageBps,
+        uint256 deadline
     )
         internal
         returns (uint256 amountOut)
@@ -909,22 +910,23 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
             tokenOut: tokenOut,
             tickSpacing: tickSpacing,
             recipient: address(this),
-            deadline: block.timestamp + 300,
+            deadline: deadline,
             amountIn: amountIn,
             amountOutMinimum: minAmountOut,
             sqrtPriceLimitX96: 0
         });
 
-        amountOut = SWAP_ROUTER.exactInputSingle(params);
+        SWAP_ROUTER.exactInputSingle(params);
 
-        // Verify the output
+        // Verify the output using balance difference only
         uint256 balanceAfter = IERC20(tokenOut).balanceOf(address(this));
         uint256 actualReceived = balanceAfter >= balanceBefore ? balanceAfter - balanceBefore : 0;
         if (actualReceived < minAmountOut) {
             revert InsufficientOutput(minAmountOut, actualReceived);
         }
 
-        return actualReceived;
+        amountOut = actualReceived;
+        return amountOut;
     }
 
 
@@ -933,7 +935,8 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         address tokenOut,
         uint256 amountIn,
         SwapRoute memory route,
-        uint256 slippageBps
+        uint256 slippageBps,
+        uint256 deadline
     )
         internal
         returns (uint256 amountOut)
@@ -953,7 +956,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
 
         // Single hop swap
         if (route.pools.length == 1) {
-            return _swapExactInputDirect(route.tokens[0], route.tokens[1], amountIn, route.pools[0], slippageBps);
+            return _swapExactInputDirect(route.tokens[0], route.tokens[1], amountIn, route.pools[0], slippageBps, deadline);
         }
 
         // Multi-hop swap using exactInput with encoded path
@@ -967,21 +970,22 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
         ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
             path: path,
             recipient: address(this),
-            deadline: block.timestamp + 300,
+            deadline: deadline,
             amountIn: amountIn,
             amountOutMinimum: minAmountOut
         });
 
-        amountOut = SWAP_ROUTER.exactInput(params);
+        SWAP_ROUTER.exactInput(params);
 
-        // Verify the output
+        // Verify the output using balance difference only
         uint256 balanceAfter = IERC20(tokenOut).balanceOf(address(this));
         uint256 actualReceived = balanceAfter >= balanceBefore ? balanceAfter - balanceBefore : 0;
         if (actualReceived < minAmountOut) {
             revert InsufficientOutput(minAmountOut, actualReceived);
         }
 
-        return actualReceived;
+        amountOut = actualReceived;
+        return amountOut;
     }
 
     function _encodeMultihopPath(SwapRoute memory route) internal pure returns (bytes memory) {
@@ -1087,7 +1091,7 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
      * @param amount Amount to recover
      * @dev Only callable by wallet registry
      */
-    function recoverToken(address token, uint256 amount) external {
+    function recoverToken(address token, uint256 amount) external nonReentrant {
         // Only the owner of the wallet registry can recover tokens
         if (address(walletRegistry) == address(0)) revert UnauthorizedAccess();
         if (msg.sender != walletRegistry.owner()) revert UnauthorizedAccess();
