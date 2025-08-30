@@ -12,6 +12,7 @@ import { IMixedQuoter } from "@interfaces/IMixedQuoter.sol";
 import { ISugarHelper } from "@interfaces/ISugarHelper.sol";
 import { IERC20 } from "@interfaces/IERC20.sol";
 import { IAerodromeOracle } from "@interfaces/IAerodromeOracle.sol";
+import { AggregatorV3Interface } from "@interfaces/AggregatorV3Interface.sol";
 import { IERC721Receiver } from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
@@ -59,11 +60,21 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     IMixedQuoter public constant QUOTER = IMixedQuoter(0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0);
     ISugarHelper public constant SUGAR_HELPER = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     IAerodromeOracle public constant ORACLE = IAerodromeOracle(0x43B36A7E6a4cdFe7de5Bd2Aa1FCcddf6a366dAA2);
+    
+    // Chainlink Price Feeds
+    AggregatorV3Interface public constant ETH_USD_FEED = AggregatorV3Interface(0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70);
+    AggregatorV3Interface public constant AERO_USD_FEED = AggregatorV3Interface(0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0);
+    AggregatorV3Interface public constant BTC_USD_FEED = AggregatorV3Interface(0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F);
+    
+    // Oracle configuration
+    uint256 public constant MAX_PRICE_STALENESS = 3600; // 1 hour
+    uint256 public constant MAX_PRICE_DEVIATION = 2000; // 20%
 
     /// @notice Token addresses
     address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address public constant WETH = 0x4200000000000000000000000000000000000006;
     address public constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address public constant AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631;
 
     /// @notice Oracle connector for direct routing
     address private constant NONE_CONNECTOR = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
@@ -743,44 +754,95 @@ contract LiquidityManager is AtomicBase, IERC721Receiver {
     }
 
     /**
-     * @notice Gets token price in USDC via oracle
+     * @notice Gets token price in USDC via Chainlink oracles with staleness protection
      * @param token Token address to get price for
      * @return price Token price in USDC with 6 decimals
-     * @dev Tries multiple connectors for best route
+     * @dev Uses Chainlink for ETH/AERO, falls back to Aerodrome for others
      */
     function getTokenPriceViaOracle(address token) public view returns (uint256 price) {
         if (token == USDC) {
             return 1e6;
         }
-
-        // Try different connectors in order: NONE, WETH, cbBTC (skip USDC since src is already USDC)
+        
+        // Use Chainlink for supported tokens
+        if (token == WETH) {
+            return _getChainlinkPriceInUSDC(ETH_USD_FEED);
+        }
+        
+        if (token == AERO) {
+            return _getChainlinkPriceInUSDC(AERO_USD_FEED);
+        }
+        
+        // cbBTC uses BTC price (1:1 parity)
+        if (token == CBBTC) {
+            return _getChainlinkPriceInUSDC(BTC_USD_FEED);
+        }
+        
+        // Fallback to Aerodrome Oracle for other tokens
+        return _getAerodromePriceInUSDC(token);
+    }
+    
+    /**
+     * @notice Get price from Chainlink with staleness checks
+     * @param priceFeed Chainlink price feed contract
+     * @return Price in USDC terms with 6 decimals
+     */
+    function _getChainlinkPriceInUSDC(AggregatorV3Interface priceFeed) internal view returns (uint256) {
+        (
+            uint80 roundId,
+            int256 price,
+            ,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        ) = priceFeed.latestRoundData();
+        
+        // Validate price data
+        require(price > 0, "Invalid Chainlink price");
+        require(updatedAt > 0, "Round not complete");
+        require(answeredInRound >= roundId, "Stale price round");
+        
+        // Check staleness (1 hour max)
+        require(block.timestamp - updatedAt <= MAX_PRICE_STALENESS, "Chainlink price too old");
+        
+        // Chainlink feeds typically have 8 decimals, we need 6 for USDC
+        uint8 feedDecimals = priceFeed.decimals();
+        
+        if (feedDecimals > 6) {
+            return uint256(price) / 10**(feedDecimals - 6);
+        } else if (feedDecimals < 6) {
+            return uint256(price) * 10**(6 - feedDecimals);
+        } else {
+            return uint256(price);
+        }
+    }
+    
+    /**
+     * @notice Fallback to Aerodrome Oracle for unsupported tokens
+     * @param token Token to get price for
+     * @return price Price in USDC with 6 decimals
+     */
+    function _getAerodromePriceInUSDC(address token) internal view returns (uint256 price) {
+        // Try different connectors in order: NONE, WETH, cbBTC
         address[3] memory connectors = [NONE_CONNECTOR, WETH, CBBTC];
 
         for (uint256 i = 0; i < connectors.length; i++) {
             try ORACLE.getRate(
-                token, // from token (the token we want price for)
-                USDC, // to token (USDC)
+                token,
+                USDC,
                 connectors[i],
                 0
             ) returns (uint256 rate, uint256 weight) {
                 if (rate > 0 && weight > 0) {
-                    // Oracle returns how much USDC we get for 1e18 units of the source token
-                    // We need to adjust for tokens with different decimals
                     uint8 tokenDecimals = IERC20Metadata(token).decimals();
                     
                     if (tokenDecimals == 18) {
-                        // For 18 decimal tokens, rate is already the price
                         price = rate;
                     } else if (tokenDecimals < 18) {
-                        // For tokens with < 18 decimals, we need to divide by the difference
-                        // e.g., cbBTC has 8 decimals, so divide by 10^(18-8) = 10^10
                         price = rate / (10 ** (18 - tokenDecimals));
                     } else {
-                        // For tokens with > 18 decimals (rare), multiply
                         price = rate * (10 ** (tokenDecimals - 18));
                     }
 
-                    // Ensure price is non-zero
                     if (price > 0) {
                         return price;
                     }
